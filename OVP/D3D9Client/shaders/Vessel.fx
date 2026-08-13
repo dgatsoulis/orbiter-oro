@@ -123,7 +123,14 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
 	// ----------------------------------------------------------------------
 
 #if SHDMAP > 0
-	cSun.rgb *= ComputeShadow(frg.shdH, dLN, sc);
+	{
+		float fShd = ComputeShadow(frg.shdH, dLN, sc);
+		cSun.rgb *= fShd;
+		// ORO patch (p): let the shadow eat the AMBIENT share of Base too. Base is
+		// (ambient + emissive), so subtracting at most the ambient part can never take
+		// Base below emissive and never goes negative.
+		Base -= (gMtrl.ambient.rgb * gSun.Ambient) * ((1.0f - fShd) * gVCShdDepth);
+	}
 #endif
 
 

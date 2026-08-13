@@ -944,11 +944,18 @@ void vVessel::RenderVectors (LPDIRECT3DDEVICE9 dev, D3D9Pad *pSkp)
 
 
 // ============================================================================================
-//
+// ORO patch (n): an addon may suppress the stock exhaust billboards per vessel so it can
+// draw its own exhaust visuals (see gcCore::SuppressExhaust - the reentry patch's story,
+// told again for the engine flames). The gate lives HERE so both Scene call sites (the main
+// pass and the custom-camera pass) are covered by one line. ExhaustLength stays zero for a
+// suppressed vessel: nothing is rendered, so nothing downstream should size off it.
+extern bool gcIsExhaustSuppressed(OBJHANDLE hVessel);
+
 bool vVessel::RenderExhaust()
 {
 	ExhaustLength = 0.0f;
 	if (!active) return false;
+	if (gcIsExhaustSuppressed(Object())) return true;
 
 	DWORD nexhaust = vessel->GetExhaustCount();
 	if (!nexhaust) return true; // nothing to do
@@ -1715,10 +1722,19 @@ void vVessel::AnimateComponent (ANIMATIONCOMP *comp, const D3DXMATRIX &T)
 // ============================================================================================
 //
 
+// ORO addon (2026): an addon may suppress the stock reentry billboards per vessel so it
+// can draw its own. Implemented in gcCore.cpp; declared here rather than in a header to keep
+// the patch to one bool. See gcCore::SuppressReentry for why this exists at all - in short,
+// this function honours neither vessel->reentry.do_render (which VESSEL::SetReentryTexture
+// sets, and which the INLINE renderer respects) nor the user's CfgVisualPrm.bReentryFlames
+// option, so without this there is no way to turn these billboards off under D3D9Client.
+extern bool gcIsReentrySuppressed(OBJHANDLE hVessel);
+
 void vVessel::RenderReentry(LPDIRECT3DDEVICE9 dev)
 {
 
 	if (defreentrytex == NULL || nmesh < 1) return;
+	if (gcIsReentrySuppressed(Object())) return;
 
 	double p = vessel->GetAtmDensity();
 	double v = vessel->GetAirspeed();

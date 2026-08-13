@@ -16,6 +16,11 @@
 
 using namespace oapi;
 
+// ORO patch (n) flags: billboards and exhaust particle streams suppress
+// INDEPENDENTLY. An addon typically replaces one and not the other.
+#define GCEXH_BILLBOARD 0x1   ///< hide the stock exhaust billboards
+#define GCEXH_STREAM    0x2   ///< stop the stock exhaust particle streams emitting
+
 class gcCore;
 class gcCore2;
 
@@ -57,6 +62,7 @@ static class gcCore2 *pCoreInterface = NULL;
 #define RENDERPROC_HUD_2ND				0x0002	///< Register a HUD callback to draw over Orbiter's main HUD
 #define RENDERPROC_PLANETARIUM			0x0003	///< Register a HUD callback to draw into a planetarium view using perspective projection
 #define RENDERPROC_EXTERIOR				0x0005  ///< Register a callback to draw into an exterior vessel view using perspective projection
+#define RENDERPROC_PRE_RESOLVE			0x0006  ///< ORO patch (i): fires after the complete scene (terrain, vessels, transparency, VC) but BEFORE the light-blur resolve/tonemap and the HUD. Art drawn here participates in HDR bloom when PostProcess=1 (the render target is still the fp16 offscreen buffer). Ortho pixel coordinates (NULL matrices), same contract as the HUD stages.
 ///@}
 
 
@@ -360,6 +366,15 @@ public:
 		DWORD color;
 	} clrVtx;
 
+	// ORO patch (l): a textured triangle vertex - clrVtx plus texture coordinates.
+	// u,v are in TEXELS of the bound texture (the Sketchpad multiplies by its inverse
+	// texture size internally, the same convention as its own blit paths).
+	typedef struct {
+		FVECTOR2 pos;
+		float u, v;
+		DWORD color;
+	} texVtx;
+
 
 	// ===========================================================================
 	/// \name Custom swap-chain management functions
@@ -386,6 +401,94 @@ public:
 	* \return A Handle to a rendering surface (i.e. backbuffer)
 	*/
 	gc_interface SURFHANDLE GetRenderTarget(HSWAP hSwap);
+
+	/**
+	* \brief Get a handle to the main render window's backbuffer surface.
+	* \return SURFHANDLE wrapping the current backbuffer (non-owning; do not release).
+	* \note ORO addon (2026): exposes the client's existing D3D9Client::GetBackBufferHandle()
+	*  so a module can post-process the live frame through the image-processing pipeline
+	*  (use as the CopyResource source and as the gcIPInterface::SetOutput target).
+	*/
+	gc_interface SURFHANDLE GetBackBufferHandle();
+
+	/**
+	* \brief Copy one surface onto another (StretchRect), safe to call mid-scene.
+	* \param tgt destination surface (e.g. a render-target texture)
+	* \param src source surface (e.g. the backbuffer from GetBackBufferHandle)
+	* \return true on success.
+	* \note ORO addon (2026): unlike StretchRectInScene this issues the device StretchRect
+	*  directly WITHOUT a Begin/EndScene wrapper, so it works from inside a render callback
+	*  (which already runs between the device's BeginScene/EndScene). Full-surface copy
+	*  (whole src -> whole tgt); resolves multisampling if the backbuffer is AA'd.
+	*/
+	gc_interface bool CopyResource(SURFHANDLE tgt, SURFHANDLE src);
+
+	/**
+	* \brief Suppress this client's built-in reentry flames for one vessel.
+	* \param hVessel vessel to suppress (or re-enable)
+	* \param bSuppress true to hide the stock reentry billboards, false to restore them
+	* \note ORO addon (2026): Orbiter documents VESSEL::SetReentryTexture(NULL) as
+	*  suppressing reentry flames and the INLINE renderer honours it (plus the user's
+	*  CfgVisualPrm.bReentryFlames option). vVessel::RenderReentry honours neither - it
+	*  gates only on the client's own defreentrytex - so under D3D9Client both the
+	*  documented API and the user's Launchpad setting are silently ignored, and an addon
+	*  replacing the reentry visuals cannot turn the stock ones off.
+	* \note The proper fix is for RenderReentry to honour reentry.do_render, but that flag
+	*  is core-internal (Src/Orbiter/Vessel.h) and unreachable from a client DLL. This is
+	*  the client-side equivalent: an explicit per-vessel opt-in the addon manages.
+	* \note An addon MUST clear its suppressions on unload, or the vessel keeps its flames
+	*  hidden for the rest of the session.
+	*/
+	gc_interface void SuppressReentry(OBJHANDLE hVessel, bool bSuppress);
+
+	/**
+	* \brief Suppress this client's engine-exhaust rendering for one vessel (ORO patch n).
+	* \param hVessel vessel to suppress (or re-enable)
+	* \param bSuppress true to hide the stock exhaust billboards AND stop its exhaust
+	*  particle streams emitting, false to restore both
+	* \note ORO addon (2026): the reentry story again (see SuppressReentry) - an addon
+	*  drawing its own exhaust visuals has no route to the stock ones. The exhaust list is
+	*  reachable (GetExhaustCount/DelExhaust/AddExhaust) but rewriting another vessel's
+	*  list churns indices that vessel's own code may hold, and particle streams are worse:
+	*  DelExhaustStream needs the PSTREAM_HANDLE only the creating vessel ever received.
+	*  So the render side is gated here instead, per vessel, additively restorable.
+	* \note Suppression stops stream EMISSION only - particles already in flight expire
+	*  naturally (the patch-(e) rule, so lifting it never releases a backlog burst).
+	* \note An addon MUST clear its suppressions on unload, or the vessel keeps its
+	*  exhaust hidden for the rest of the session.
+	*/
+	gc_interface void SuppressExhaust(OBJHANDLE hVessel, DWORD flags);
+
+	/**
+	* rief ORO patch (o): exempt ONE particle stream from patch (n)'s per-vessel
+	*  exhaust suppression.
+	* \param hStream the stream handle returned by VESSEL::AddExhaustStream
+	* \param bExempt true to keep this stream emitting while its vessel is suppressed
+	* 
+ote (n) is per VESSEL, which is correct for hiding what a vessel author
+	*  shipped and wrong the moment an addon adds its OWN exhaust stream to that same
+	*  vessel - the replacement would be suppressed along with the thing it replaces.
+	*  AddParticleStream is not an escape route: clbkCreateParticleStream is
+	*  unimplemented in this client, so every usable stream is an ExhaustStream.
+	* 
+ote An addon MUST clear its exemptions on unload.
+	*/
+	gc_interface void ExemptNewStreams(bool bExempt);
+
+	/**
+	* \brief Tune the virtual-cockpit shadow pass (ORO patch f).
+	* \param bEnable false to skip the internal-pass shadow map entirely
+	* \param radius half-width [m] of the ortho box fitted around the eye
+	* \note The VC shadow map is fitted to the CABIN rather than the hull, because the
+	*  exterior box (the vessel's bounding sphere, ~20 m on a DeltaGlider) is ~1 cm per
+	*  texel at ShadowMapSize 2048 - invisible on a fuselage at fifty metres, and visible
+	*  stair-stepping on a panel forty centimetres from the eye. Smaller is sharper but
+	*  stops distant geometry casting into the cabin, so the right value is per-vessel
+	*  taste; this exposes it rather than guessing once for everyone.
+	* \note bEnable is a development/AB convenience. The pass is otherwise governed by
+	*  the user's ShadowMapMode setting, which stays the real switch.
+	*/
+	gc_interface void SetVCShadows(bool bEnable, float radius, float depth);
 
 	/**
 	* \brief Release a swap object after it's no longer needed.
@@ -485,6 +588,86 @@ public:
 	* \note PF_STRIP Is build from quads. Where each quad requires two vertices. ("npt" must be "number of quads" * 2 + 2)
 	*/
 	gc_interface HPOLY CreateTriangles(HPOLY hPoly, const clrVtx* pt, int npt, DWORD flags);
+
+
+	/**
+	* \brief [ORO patch (g) 2026] Like CreateTriangles, but each vertex also carries a
+	*   CAMERA-SPACE linear depth in pDepth[i]. Drawn with the 0x100 blend-state bit, the
+	*   Sketchpad clips fragments occluded by the scene (sampled from the client's GBUF_DEPTH),
+	*   so screen-space additive geometry sits behind the cockpit / hull / terrain instead of
+	*   painting over them. If the depth buffer is unavailable (SunGlare off) the clip silently
+	*   no-ops and the poly draws as a plain additive triangle list. pDepth length == npt.
+	* \note Exposes what the client already renders (RENDERPASS_NORMAL_DEPTH, cockpit included);
+	*   the same shape as GetBackBufferHandle - a handle onto an existing internal resource.
+	*/
+	gc_interface HPOLY CreateTrianglesDepth(HPOLY hPoly, const clrVtx* pt, const float* pDepth, int npt, DWORD flags);
+
+
+	/**
+	* \brief [ORO patch (g) 2026] True if the scene depth buffer exists this session (SunGlare
+	*   on), i.e. CreateTrianglesDepth will actually clip rather than fall back. Lets an addon
+	*   decide whether to lean on real depth or keep a geometric occlusion fallback.
+	*/
+	gc_interface bool HasDepthBuffer();
+
+
+	/**
+	* \brief [ORO patch (l) 2026] CreateTriangles with TEXTURED vertices: each fragment is
+	*   texture x per-vertex Gouraud colour (a MODULATE the stock Sketchpad texture path lacks -
+	*   its blits REPLACE colour with texture). Same lifecycle as CreateTriangles (create once,
+	*   NULL hPoly; update in place after), same full-creation-count update rule, and the same
+	*   optional per-vertex depth array as CreateTrianglesDepth - so textured geometry can be
+	*   depth-clipped against the scene with the 0x100 blend bit, exactly like the colour polys.
+	* \param hTex The texture (an OAPISURFACE_TEXTURE surface). Sampled LINEAR/CLAMP. The
+	*   surface must outlive the poly; the poly holds no reference. NULL = draw as plain
+	*   Gouraud (texture term becomes 1).
+	* \note Built for luminous world-effects that must take their per-pixel shape from real
+	*   data (a lightning flash lit by the planet's own cloud map), and the substrate the
+	*   textured-particle family needs (mipmapped smoke sprites).
+	*/
+	gc_interface HPOLY CreateTrianglesTex(HPOLY hPoly, const texVtx* pt, const float* pDepth, int npt, DWORD flags, SURFHANDLE hTex);
+
+
+	/**
+	* \brief [ORO patch (l) 2026] Fill a texture surface from CPU memory: w*h 32-bit
+	*   X8R8G8B8/A8R8G8B8 texels, tightly packed, top row first. The surface must be an
+	*   OAPISURFACE_TEXTURE of exactly w x h in a 32-bit format (oapiCreateSurfaceEx). Uploads
+	*   through a SYSTEMMEM staging texture + UpdateTexture - the canonical D3D9 path - so it
+	*   is main-thread only (resource creation), not for the render callback.
+	* \note Exists because no public oapi route can put CPU bytes into a texture at runtime,
+	*   and the flash textures are composited per event from cloud data already in memory.
+	*/
+	gc_interface bool UpdateTexture2D(SURFHANDLE hSurf, const void* pBits, int w, int h);
+
+	/**
+	* \brief [ORO patch (k) 2026] Snapshot of the camera the CURRENT frame is being rendered
+	*   with: global position, rotation matrix and tan(aperture), in the same conventions as
+	*   oapiCameraGlobalPos / oapiCameraRotationMatrix / tan(oapiCameraAperture()).
+	* \param pos Receives the camera's global position.
+	* \param rot Receives the camera's rotation matrix (camera->global; use tmul to project).
+	* \param tanAp Receives tan(aperture).
+	* \return true if a scene exists and the values were written.
+	* \note THE POINT: module clbkPreStep AND clbkPostStep both run before Orbiter updates
+	*   the camera for the frame, so any geometry a module projects there uses a camera one
+	*   full step stale. Vessel-anchored overlays never notice (a tracking camera holds the
+	*   vessel still on screen), but close-range WORLD-anchored geometry (the ORO reentry
+	*   trail) jumps by one frame of camera travel - ~120 m at entry speed. Calling this from
+	*   inside a render callback (the only place it is meaningful) returns the camera the
+	*   scene is ACTUALLY using, refreshed at the top of Scene::RenderMainScene.
+	*/
+	gc_interface bool GetRenderCam(VECTOR3* pos, MATRIX3* rot, double* tanAp);
+
+	/**
+	* \brief [ORO patch (k2) 2026] The global position the scene is rendering an object at
+	*   THIS frame (the object's vObject::GlobalPos, refreshed at render start together with
+	*   the camera). The render-epoch companion to GetRenderCam: an addon reconstructing
+	*   world-anchored geometry as "body position + offset" must anchor to the SAME body
+	*   position the renderer uses, or the whole reconstruction shifts by the body's velocity
+	*   times any epoch gap (~500 m/frame for an Earth-anchored trail - the barycentric frame
+	*   moves at 30 km/s) and jitters with frame pacing.
+	* \return true if the object has a visual this session and pos was written.
+	*/
+	gc_interface bool GetRenderObjPos(OBJHANDLE hObj, VECTOR3* pos);
 
 
 	/**

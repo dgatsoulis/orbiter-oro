@@ -144,6 +144,16 @@ uniform extern float     gDistScale;
 uniform extern float     gFogDensity;
 uniform extern float     gTime;
 uniform extern float     gMix;				// General purpose parameter (multible uses)
+// ORO patch (p): VC SHADOW DEPTH, 0..1. Stock self-shadowing multiplies the SUN
+// term only, so a fully shadowed pixel keeps its material AMBIENT and EMISSIVE - and
+// a virtual cockpit is authored with plenty of both, which is why VC shadows read as
+// a faint grey smudge no external setting can deepen. This lets the shadow take the
+// AMBIENT term with it, by a user-set fraction. EMISSIVE IS DELIBERATELY UNTOUCHED:
+// a lit instrument panel does not care what is between it and the sun, and dimming
+// MFDs as a canopy shadow sweeps over them reads as a bug. Scene.cpp raises this for
+// the COCKPIT PASS ONLY and clears it after, so exterior shading is bit-for-bit stock;
+// 0 is also exactly stock, so the whole patch is inert until an addon asks for it.
+uniform extern float     gVCShdDepth;
 uniform extern float 	 gMtrlAlpha;
 uniform extern float	 gGlowConst;
 uniform extern float	 gNightTime;		// 1 for nighttime, 0 for daytime

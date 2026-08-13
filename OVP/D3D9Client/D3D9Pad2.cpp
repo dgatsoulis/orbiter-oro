@@ -962,12 +962,12 @@ void D3D9PolyLine::Update(const FVECTOR2 *_pt, int _npt, bool bConnect)
 
 
 
-D3D9Triangle::D3D9Triangle(LPDIRECT3DDEVICE9 pDev, const gcCore::clrVtx *pt, int npt, int _style) : D3D9PolyBase(1)
+D3D9Triangle::D3D9Triangle(LPDIRECT3DDEVICE9 pDev, const gcCore::clrVtx *pt, int npt, int _style, const float *pDepth) : D3D9PolyBase(1)
 {
 	nPt = npt;
 	style = _style;
 	HR(pDev->CreateVertexBuffer(nPt * sizeof(SkpVtx), D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT, &pVB, NULL));
-	if (pt) Update(pt, npt);
+	if (pt) Update(pt, npt, pDepth);
 }
 
 
@@ -1000,7 +1000,7 @@ void D3D9Triangle::Draw(D3D9Pad* pSkp, LPDIRECT3DDEVICE9 pDev)
 
 // ===============================================================================================
 //
-void D3D9Triangle::Update(const gcCore::clrVtx *pt, int npt)
+void D3D9Triangle::Update(const gcCore::clrVtx *pt, int npt, const float *pDepth)
 {
 	SkpVtx *Vtx = NULL;
 	HR(pVB->Lock(0, 0, (LPVOID*)&Vtx, D3DLOCK_DISCARD));
@@ -1010,8 +1010,39 @@ void D3D9Triangle::Update(const gcCore::clrVtx *pt, int npt)
 	for (int i = 0; i < npt; i++) {
 		Vtx[i].x = pt[i].pos.x;
 		Vtx[i].y = pt[i].pos.y;
+		// ORO patch (g): l is POSITION0.z in the vertex decl and reaches the pixel shader
+		// as frg.len (OrthoVS). Unused (0) for a plain colour triangle; the camera-space
+		// depth when the caller wants depth clipping. Zero is harmless (never occludes).
+		Vtx[i].l = pDepth ? pDepth[i] : 0.0f;
 		Vtx[i].clr = pt[i].color;
 		Vtx[i].fnc = SKPSW_CENTER | SKPSW_FRAGMENT;
+	}
+	HR(pVB->Unlock());
+}
+
+
+// ===============================================================================================
+// ORO patch (l): the TEXTURED update. u,v ride nx/ny - the same SkpVtx channel the blit
+// paths use for texture coordinates (OrthoVS: tex.xy = dir.xy * gSize.xy, so u,v are in
+// TEXELS) - and fnc selects the shader's MODULATE band: fragment = texture x vertex colour,
+// the mode the stock pad lacks (its blits replace colour with texture). pDepth composes
+// exactly as in Update; the depth clip runs after colour selection in the same shader.
+//
+void D3D9Triangle::UpdateTex(const gcCore::texVtx *pt, int npt, const float *pDepth)
+{
+	SkpVtx *Vtx = NULL;
+	HR(pVB->Lock(0, 0, (LPVOID*)&Vtx, D3DLOCK_DISCARD));
+
+	memset(Vtx, 0, sizeof(SkpVtx)*npt);
+
+	for (int i = 0; i < npt; i++) {
+		Vtx[i].x = pt[i].pos.x;
+		Vtx[i].y = pt[i].pos.y;
+		Vtx[i].l = pDepth ? pDepth[i] : 0.0f;
+		Vtx[i].nx = pt[i].u;
+		Vtx[i].ny = pt[i].v;
+		Vtx[i].clr = pt[i].color;
+		Vtx[i].fnc = SKPSW_CENTER | SKPSW_TEXMODUL;
 	}
 	HR(pVB->Unlock());
 }

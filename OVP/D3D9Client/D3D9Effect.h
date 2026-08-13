@@ -142,6 +142,7 @@ public:
 	static D3DXHANDLE	eOITEnable;	   ///< BOOL
 	static D3DXHANDLE	eInvProxySize;
 	static D3DXHANDLE	eMix;          ///< FLOAT Auxiliary factor/multiplier
+	static D3DXHANDLE	eVCShdDepth;   ///< FLOAT ORO patch (p): VC shadow ambient bite, 0..1
 	static D3DXHANDLE   eColor;        ///< Auxiliary color input
 	static D3DXHANDLE   eFogColor;     ///< Fog color input
 	static D3DXHANDLE   eTexOff;       ///< Surface tile texture offsets

@@ -46,6 +46,10 @@ std::vector<FontCache *> fcache;
 oapi::Font * deffont = 0;
 oapi::Pen * defpen = 0;
 
+// ORO patch (g): forward declaration so Flush() can read the depth texture; the
+// definition (and the doc comment) live with the other file-scope globals at the bottom.
+extern LPDIRECT3DTEXTURE9 g_gcSceneDepth;
+
 
 // ===============================================================================================
 //
@@ -155,7 +159,9 @@ void D3D9Pad::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 pDevice)
 	eGamma	  = FX->GetParameterByName(0, "gGamma");
 	eNoiseColor = FX->GetParameterByName(0, "gNoiseColor");
 	eColorMatrix = FX->GetParameterByName(0, "gColorMatrix");
-	
+	eDepthClip = FX->GetParameterByName(0, "gDepthClip");   // ORO patch (g)
+	eDepthTex  = FX->GetParameterByName(0, "gDepthTex");    // ORO patch (g)
+
 }
 
 
@@ -339,8 +345,11 @@ D3D9Pad::~D3D9Pad ()
 //
 void D3D9Pad::SetViewProj(const D3DXMATRIX* pV, const D3DXMATRIX* pP)
 {
-	mV = mVOrig = *pV;
-	mP = mPOrig = *pP;
+	// NULL-guarded (defense in depth): the HUD render-proc stages used to reach
+	// this with NULL matrices, crashing the client. Keep the matrices unchanged
+	// (identity from LoadDefaults) when a caller passes NULL.
+	if (pV) mV = mVOrig = *pV;
+	if (pP) mP = mPOrig = *pP;
 }
 
 
@@ -448,6 +457,7 @@ bool D3D9Pad::Flush(HPOLY hPoly)
 
 	DWORD dwBlend = dwBlendState & 0xF;
 	DWORD dwFilter = dwBlendState & 0xF0;
+	bool bAdditive = false;		// ORO patch d: SKPBS_ADDITIVE (0x5) in flight this flush
 	
 #ifdef SKPDBG 
 	char buf[128]; strcpy_s(buf, 128, "");
@@ -475,6 +485,18 @@ bool D3D9Pad::Flush(HPOLY hPoly)
 		
 	HR(FX->SetFloat(eRandom, float(oapiRand())));
 	HR(FX->SetVector(eTarget, &vTarget));
+
+	// ORO patch (g): per-fragment DEPTH CLIP against the scene depth buffer. Enabled by
+	// the 0x100 bit on the blend state (the no-SDK-header trick from patch d), and only when
+	// the depth texture actually exists (SunGlare on). The shader compares each fragment's
+	// camera-space depth (carried in SkpVtx.l -> frg.len) against GBUF_DEPTH.a and clips the
+	// occluded ones - so an addon's screen-space additive geometry (aurora / reentry plasma)
+	// sits BEHIND the cockpit, hull and terrain instead of painting over them. Set every
+	// Flush so the uniform can never leak true into ordinary 2D drawing.
+	bool bDepthClip = ((dwBlendState & 0x100) != 0) && (g_gcSceneDepth != NULL);
+	HR(FX->SetBool(eDepthClip, bDepthClip));
+	if (bDepthClip) HR(FX->SetTexture(eDepthTex, g_gcSceneDepth));
+
 	HR(FX->SetTechnique(eSketch));
 	HR(FX->Begin(&numPasses, D3DXFX_DONOTSAVESTATE));
 
@@ -488,6 +510,20 @@ bool D3D9Pad::Flush(HPOLY hPoly)
 	if (dwBlend == Sketchpad::BlendState::ALPHABLEND) {
 		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
 		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
+	}
+	else if (dwBlend == 0x5) {
+		// ORO patch d (2026-08-01): SKPBS_ADDITIVE - src.rgb * src.a ADDS to the
+		// destination (light on top of the frame: plasma, glows, flames). The Sketchpad
+		// API exposed no additive state although the device uses D3DBLEND_ONE all over
+		// the client internally (exhaust, beacons, base tiles). Set AFTER BeginPass so
+		// it overrides the pass defaults; the pass re-establishes InvSrcAlpha on the
+		// next BeginPass, and the explicit restore below keeps nothing leaking past
+		// EndPass (the effect runs D3DXFX_DONOTSAVESTATE).
+		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
+		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
+		HR(pDev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
+		HR(pDev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_ONE));
+		bAdditive = true;
 	}
 	else if (dwBlend == Sketchpad::BlendState::COPY) {
 		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
@@ -535,9 +571,14 @@ bool D3D9Pad::Flush(HPOLY hPoly)
 
 	HR(FX->EndPass());
 	HR(FX->End());
-	
+
 	HR(pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF));
 	HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, bkALPHA));
+
+	if (bAdditive) {	// ORO patch d: hand back the client-wide default blend factors
+		HR(pDev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
+		HR(pDev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
+	}
 
 	//HR(pDev->SetRenderState(D3DRS_ZENABLE, bkZEN));
 	//HR(pDev->SetRenderState(D3DRS_ZWRITEENABLE, bkZW));
@@ -1356,6 +1397,20 @@ void D3D9Pad::DrawPoly (HPOLY hPoly, DWORD flags)
 		D3D9PolyBase *pBase = static_cast<D3D9PolyBase *>(hPoly);
 		int PolyType = pBase->type;
 
+		// ORO patch (l): a textured triangle poly binds its texture through the pad's OWN
+		// state machinery (TexChangeNative -> SKPCHG_TEXTURE -> SetupDevice inside Topology
+		// below), so gTex0 / gTexEn / gSize are all applied by the code that always applies
+		// them. Colour keying belongs to the blit paths, not to poly geometry - clear it so
+		// a stale key from an earlier blit cannot clip our fragments.
+		if (PolyType == 1) {
+			LPDIRECT3DTEXTURE9 pT = static_cast<D3D9Triangle *>(pBase)->GetTex();
+			if (pT) {
+				bColorKey = false;
+				cColorKey = D3DXCOLOR(DWORD(0));
+				TexChangeNative(pT);
+			}
+		}
+
 		if ((PolyType == 0) && !HasPen()) return;
 
 		// Flush pending graphics before a use of different interface 
@@ -1791,6 +1846,13 @@ D3DXHANDLE	 D3D9Pad::eNoiseTex = 0;
 D3DXHANDLE   D3D9Pad::eNoiseColor = 0;
 D3DXHANDLE   D3D9Pad::eColorMatrix = 0;
 D3DXHANDLE   D3D9Pad::eGamma = 0;
+D3DXHANDLE   D3D9Pad::eDepthClip = 0;   // ORO patch (g)
+D3DXHANDLE   D3D9Pad::eDepthTex = 0;    // ORO patch (g)
+
+// ORO patch (g): the live scene depth texture (GBUF_DEPTH), published by the Scene at
+// buffer creation (Scene.cpp) and consumed by Flush's depth-clip path below. NULL when
+// SunGlare is off, in which case depth-tagged polys fall back to plain additive geometry.
+LPDIRECT3DTEXTURE9 g_gcSceneDepth = NULL;
 
 ID3DXEffect* D3D9Pad::FX = 0;
 D3D9Client * D3D9Pad::gc = 0;

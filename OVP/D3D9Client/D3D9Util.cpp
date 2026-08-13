@@ -24,6 +24,16 @@
 extern D3D9Client* g_client;
 extern unordered_map<MESHHANDLE, class SketchMesh*> MeshMap;
 
+// NOTE: BuildDate() bakes __DATE__ at compile time; this TU is force-touched on each
+// ORO client patch so the [Build YYMMDD] marker in Orbiter.log refreshes and confirms
+// the redeployed DLL is live. (ORO patch b: gcCore backbuffer access, 2026-07-26;
+// ORO patch c: gcCore::SuppressReentry, 2026-08-01; patch f: VC shadows, 2026-08-04;
+// patch g: gcCore::CreateTrianglesDepth + Sketchpad depth clip, 2026-08-05;
+// patch i: RENDERPROC_PRE_RESOLVE, the pre-bloom compositing slot, 2026-08-08;
+// patch j: atomic Win32 cfg write - stock WriteParams crashed at exit inside
+// the core's dead C++ statics and left a 0-byte D3D9Client.cfg, 2026-08-08;
+// patch n: gcCore::SuppressExhaust - per-vessel stock exhaust billboards +
+// exhaust-stream emission off, the reentry suppression's sibling, 2026-08-09.)
 DWORD BuildDate()
 {
 	const char *months[] = { "???","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};

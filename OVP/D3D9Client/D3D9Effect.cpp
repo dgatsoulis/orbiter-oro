@@ -92,6 +92,7 @@ D3DXHANDLE D3D9Effect::eFogColor = 0;	// Fog color input
 D3DXHANDLE D3D9Effect::eTexOff = 0;		// Surface tile texture offsets
 D3DXHANDLE D3D9Effect::eTime = 0;		// FLOAT Simulation elapsed time
 D3DXHANDLE D3D9Effect::eMix = 0;		// FLOAT Auxiliary factor/multiplier
+D3DXHANDLE D3D9Effect::eVCShdDepth = 0;	// FLOAT ORO patch (p)
 D3DXHANDLE D3D9Effect::eFogDensity = 0;	// 
 D3DXHANDLE D3D9Effect::ePointScale = 0;
 D3DXHANDLE D3D9Effect::eSHD = 0;
@@ -445,6 +446,7 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
 	eEast		  = FX->GetParameterByName(0,"gEast");
 	ePointScale   = FX->GetParameterByName(0,"gPointScale");
 	eMix		  = FX->GetParameterByName(0,"gMix");
+	eVCShdDepth   = FX->GetParameterByName(0,"gVCShdDepth");
 	eTime		  = FX->GetParameterByName(0,"gTime");
 	eMtrlAlpha	  = FX->GetParameterByName(0,"gMtrlAlpha");
 	eGlowConst    = FX->GetParameterByName(0,"gGlowConst");

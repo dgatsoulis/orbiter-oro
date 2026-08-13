@@ -43,6 +43,9 @@ extern oapi::Pen  *defpen;
 #define SKPSW_FRAGMENT		0x00000000	// Index 2
 #define SKPSW_PENCOLOR		0x00000080	// Index 2
 #define SKPSW_TEXTURE		0x000000FF	// Index 2
+#define SKPSW_TEXMODUL		0x0000001A	// Index 2 - ORO patch (l): texture x vertex colour
+										// (byte 26 -> 0.102; the shader tests 0.06..0.14, a band
+										// no stock value occupies - 0x00, 0x80 and 0xFF all miss)
 
 // Specials:
 #define SKPSW_FONT			0x0000FF00	// Index 1
@@ -711,6 +714,8 @@ private:
 	static D3DXHANDLE   eCovEn;
 	static D3DXHANDLE   eClearEn;
 	static D3DXHANDLE   eEffectsEn;
+	static D3DXHANDLE   eDepthClip;		// ORO patch (g): enable per-fragment depth clip
+	static D3DXHANDLE   eDepthTex;		// ORO patch (g): the scene depth texture (GBUF_DEPTH)
 };
 
 
@@ -873,10 +878,19 @@ class D3D9Triangle : public D3D9PolyBase
 {
 
 public:
-	D3D9Triangle(LPDIRECT3DDEVICE9 pDev, const gcCore::clrVtx *pt, int npt, int style);
+	// pDepth (ORO patch g): optional per-vertex CAMERA-SPACE depth, stored in the spare
+	// SkpVtx.l (POSITION0.z) so the depth-clip shader path can compare it against the scene.
+	// NULL = a plain 2D colour triangle poly, exactly as before.
+	D3D9Triangle(LPDIRECT3DDEVICE9 pDev, const gcCore::clrVtx *pt, int npt, int style, const float *pDepth = NULL);
 	~D3D9Triangle();
 
-	void Update(const gcCore::clrVtx *pt, int npt);
+	void Update(const gcCore::clrVtx *pt, int npt, const float *pDepth = NULL);
+	// ORO patch (l): the TEXTURED update - u,v (texels) ride SkpVtx.nx/ny (the blit paths'
+	// own texcoord channel) and fnc selects the shader's modulate band (SKPSW_TEXMODUL:
+	// fragment = texture x vertex colour). Composes with pDepth exactly like Update.
+	void UpdateTex(const gcCore::texVtx *pt, int npt, const float *pDepth = NULL);
+	void SetTex(LPDIRECT3DTEXTURE9 pT) { pTex = pT; }
+	LPDIRECT3DTEXTURE9 GetTex() const  { return pTex; }
 	void Draw(D3D9Pad*, LPDIRECT3DDEVICE9 pDev);
 	void Release();
 
@@ -884,6 +898,9 @@ private:
 	int style;
 	WORD nPt;
 	LPDIRECT3DVERTEXBUFFER9 pVB;
+	// ORO patch (l): the poly's texture, or NULL for a plain colour poly. NOT ref-counted:
+	// the owning SURFHANDLE must outlive the poly (documented on gcCore::CreateTrianglesTex).
+	LPDIRECT3DTEXTURE9 pTex = NULL;
 };
 
 #endif

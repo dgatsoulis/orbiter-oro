@@ -194,8 +194,13 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 	// Add vessel self-shadows
 	// ----------------------------------------------------------------------
 
+	float fAmbShd = 1.0f;         // ORO patch (p): ambient survival in shadow
 #if SHDMAP > 0
-	cSun *= smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
+	{
+		float fShd = smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
+		cSun *= fShd;
+		fAmbShd = lerp(1.0f, fShd, gVCShdDepth);
+	}
 #endif
 
 
@@ -254,7 +259,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 	cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
 
 	// Bake material props and lights together
-	float3 diffBaked = Light_fx(gMtrl.diffuse.rgb * (dLN * cSun + cDiffLocal) + gMtrl.emissive.rgb + gMtrl.ambient.rgb*gSun.Ambient);
+	float3 diffBaked = Light_fx(gMtrl.diffuse.rgb * (dLN * cSun + cDiffLocal) + gMtrl.emissive.rgb + gMtrl.ambient.rgb*gSun.Ambient*fAmbShd);
 
 #if LMODE > 0
 	cSun = Light_fx(cSun + cSpecLocal);	// Add local light sources
@@ -472,7 +477,8 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
 		float angl = saturate((-dot(gCameraPos, nrmW) - gProxySize) * gInvProxySize);
 		cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
 
-		cDiff.rgb *= saturate( (gMtrl.diffuse.rgb*(dLN * cSun + cDiffLocal)) + (gMtrl.ambient.rgb*gSun.Ambient) + gMtrl.emissive.rgb );
+		// ORO patch (p): fShadow is already in hand here (it scaled dLN above).
+		cDiff.rgb *= saturate( (gMtrl.diffuse.rgb*(dLN * cSun + cDiffLocal)) + (gMtrl.ambient.rgb*gSun.Ambient*lerp(1.0f, fShadow, gVCShdDepth)) + gMtrl.emissive.rgb );
 
 		float3 CamD = normalize(frg.camW);
 		float3 HlfW = normalize(CamD - gSun.Dir);

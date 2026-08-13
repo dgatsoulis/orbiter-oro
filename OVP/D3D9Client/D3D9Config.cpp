@@ -219,8 +219,142 @@ bool D3D9Config::ReadParams ()
 }
 
 
+// ============================================================================
+// ORO patch (j): WRITE THE CFG WITH RAW WIN32 I/O, ATOMICALLY.
+//
+// The stock implementation wrote through oapiOpenFile(FILE_OUT) - i.e. a
+// `new std::ofstream` constructed INSIDE orbiter.exe. When WriteParams runs
+// from ExitModule at application close (~D3D9Config), the core's C++ static
+// objects (iostream/locale machinery) are ALREADY DESTROYED: the C-level open
+// underneath still succeeds - which TRUNCATES D3D9Client.cfg - and the C++
+// layer then rips on the dead locale facets. Measured on 2026-08-08 with a
+// raw-Win32 tracer: EXCEPTION 0xC0000005 with the instruction pointer inside
+// ASCII string bytes ("bad "), i.e. a call through a clobbered runtime
+// pointer, swallowed by the loader so the process still "exits cleanly".
+// Net effect: EVERY normal exit left a 0-byte cfg and all video settings
+// silently reverted to defaults on the next launch. (The session-start write
+// in clbkCreateRenderWindow worked - statics alive - but the next Launchpad
+// close destroyed the file again.)
+//
+// Fix: no C++ streams, no oapi file I/O - plain kernel32 CreateFile/WriteFile
+// (safe at any teardown stage), and an ATOMIC REPLACE (write .new, then
+// MoveFileEx over the real file) so no failure mode can ever leave a
+// truncated cfg again: if anything goes wrong the previous file survives.
+// Behavioural note for the upstream report: this is a stock Orbiter 2024 bug,
+// reproducible with an unpatched client - the patch only changes HOW the same
+// items are written, not which or where.
+// ============================================================================
 void D3D9Config::WriteParams ()
 {
+	char buf[8192]; int n = 0;
+#define WP_INT(name, val) n += sprintf_s(buf + n, sizeof(buf) - (size_t)n, "%s = %d\r\n",  name, (int)(val))
+#define WP_FLT(name, val) n += sprintf_s(buf + n, sizeof(buf) - (size_t)n, "%s = %g\r\n",  name, (double)(val))
+#define WP_STR(name, val) n += sprintf_s(buf + n, sizeof(buf) - (size_t)n, "%s = %s\r\n",  name, (const char*)(val))
+
+	WP_INT("EnableDX12Wrapper", Enable9On12);
+	WP_FLT("FrameRate", FrameRate);
+	WP_INT("EnableLimiter", EnableLimiter);
+	WP_INT("CustomCamMode", CustomCamMode);
+	WP_INT("PlanetPreloadMode", PlanetPreloadMode);
+	WP_INT("PlanetTexLoadFreq", PlanetLoadFrequency);
+	WP_INT("Anisotrophy", Anisotrophy);
+	WP_INT("SceneAntialias", SceneAntialias);
+	WP_INT("SketchpadFont", SketchpadFont);
+	WP_INT("PreLoadBaseVisuals", PreLBaseVis);
+	WP_INT("EnableNormalMapping", UseNormalMap);
+	WP_INT("NearClipPlaneMode", NearClipPlane);
+	WP_INT("RwyLightAnimate", RwyLightAnimate);
+	WP_FLT("RwyLightAngle", RwyLightAngle);
+	WP_FLT("RwyBrightness", RwyBrightness);
+	WP_FLT("NightLightsAngle", SunAngle);
+	WP_FLT("BumpMapAmplitude", BumpAmp);
+	WP_FLT("PlanetGlow", PlanetGlow);
+	WP_INT("EnvMapSize", EnvMapSize);
+	WP_INT("EnvMapMode", EnvMapMode);
+	WP_INT("EnvMapFaces", EnvMapFaces);
+	WP_INT("ShadowMapMode", ShadowMapMode);
+	WP_INT("ShadowMapFilter", ShadowFilter);
+	WP_INT("ShadowMapSize", ShadowMapSize);
+	WP_INT("TerrainShadowing", TerrainShadowing);
+	WP_INT("EnableGlass", EnableGlass);
+	WP_INT("EnableMeshDbg", EnableMeshDbg);
+	WP_INT("TileMipmaps", TileMipmaps);
+	WP_INT("TextureMips", TextureMips);
+	WP_INT("TileDebug", TileDebug);
+	WP_FLT("StereoSeparation", Separation);
+	WP_FLT("StereoConvergence", Convergence);
+	WP_INT("DebugLvl", DebugLvl);
+	WP_FLT("VCNearPlane", VCNearPlane);
+	WP_INT("LightConfiguration", LightConfig);
+	WP_INT("DisableDrvMgm", DisableDriverManagement);
+	WP_INT("NVPerfHUD", NVPerfHUD);
+	WP_INT("DebugLineFontSize", DebugFontSize);
+	WP_INT("DisableVisualHelperReadout", DisableVisualHelperReadout);
+	WP_FLT("LODBias", LODBias);
+	WP_INT("MeshRes", MeshRes);
+	WP_INT("MaxTiles", MaxTiles);
+	WP_INT("MicroMode", MicroMode);
+	WP_INT("MicroFilter", MicroFilter);
+	WP_INT("BlendMode", BlendMode);
+	WP_INT("MicroBias", MicroBias);
+	WP_INT("CloudMicro", CloudMicro);
+	WP_INT("PostProcess", PostProcess);
+	WP_INT("ShaderDebug", ShaderDebug);
+	WP_INT("PresentLocation", PresentLocation);
+	WP_INT("PlanetTileLoadFlags", PlanetTileLoadFlags);
+	WP_INT("LabelDisplayFlags", LabelDisplayFlags);
+	WP_INT("GDIOverlay", GDIOverlay);
+	WP_INT("gcGUIMode", gcGUIMode);
+	WP_INT("AbsoluteAnimations", bAbsAnims);
+	WP_INT("NormalmappedClouds", bCloudNormals);
+	WP_INT("TerrainFlats", bFlats);
+	WP_INT("SunGlare", bGlares);
+	WP_INT("LightsGlare", bLocalGlares);
+	WP_INT("Irradiance", bIrradiance);
+	WP_INT("AtmoQuality", bAtmoQuality);
+	WP_INT("DebugBreak", DebugBreak);
+	WP_INT("ShaderCacheUse", ShaderCacheUse);
+	WP_INT("NoPlanetAA", NoPlanetAA);
+
+	WP_FLT("OrbitalShadowMult", OrbitalShadowMult);
+	WP_FLT("GFXIntensity", GFXIntensity);
+	WP_FLT("GFXDistance", GFXDistance);
+	WP_FLT("GFXThreshold", GFXThreshold);
+	WP_FLT("GFXGamma", GFXGamma);
+	WP_FLT("GFXSunIntensity", GFXSunIntensity);
+	WP_FLT("GFXLocalMax", GFXLocalMax);
+	WP_FLT("GFXGlare", GFXGlare);
+
+	WP_STR("SolCfg", SolCfg);
+	WP_STR("DebugLineFont", DebugFont);
+	WP_STR("EarthAtmoCfg", AtmoCfg["Earth"].c_str());
+
+#undef WP_INT
+#undef WP_FLT
+#undef WP_STR
+
+	if (n <= 0 || n >= (int)sizeof(buf)) return;         // formatting failed: keep the old file
+
+	char tmpname[MAX_PATH];
+	sprintf_s(tmpname, MAX_PATH, "%s.new", cfgfile);
+
+	HANDLE h = CreateFileA(tmpname, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (h == INVALID_HANDLE_VALUE) return;                // cannot write: keep the old file
+
+	DWORD w = 0;
+	BOOL ok = WriteFile(h, buf, (DWORD)n, &w, NULL) && (w == (DWORD)n);
+	if (ok) ok = FlushFileBuffers(h);
+	CloseHandle(h);
+
+	if (ok) MoveFileExA(tmpname, cfgfile, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+	else    DeleteFileA(tmpname);                         // partial temp: discard, keep the old file
+}
+
+// Stock implementation kept for reference (DO NOT CALL AT EXIT - see patch (j)
+// note above; `new ofstream` inside the core crashes after static teardown):
+static void WriteParams_stock_disabled (D3D9Config*)
+{
+#if 0
 	FILEHANDLE hFile = oapiOpenFile (cfgfile, FILE_OUT, ROOT);
 
 	oapiWriteItem_int   (hFile, (char*)"EnableDX12Wrapper", Enable9On12);
@@ -303,4 +437,5 @@ void D3D9Config::WriteParams ()
 	oapiWriteItem_string(hFile, (char*)"EarthAtmoCfg", (char *)AtmoCfg["Earth"].c_str());
 
 	oapiCloseFile (hFile, FILE_OUT);
+#endif
 }

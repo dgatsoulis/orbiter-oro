@@ -134,6 +134,10 @@ public:
 		D3DXMATRIX	mProj;		// D3DX projection matrix for current camera state
 		D3DXMATRIX	mProjView;	// D3DX combined projection view matrix
 		D3DXMATRIX  mProjViewInf; // D3DX combined projection view matrix, far plane at infinity
+		MATRIX3		grot;		// ORO patch (k): the oapiCameraRotationMatrix this frame
+								// renders with, kept in DOUBLE precision for addons that
+								// project world-anchored geometry on the CPU (mView is the
+								// same rotation, but demoted to float)
 		OBJHANDLE	hTarget;	// Current camera target, Mesh Debugger Related
 
 		OBJHANDLE	hObj_proxy;	// closest celestial body
@@ -257,6 +261,11 @@ public:
 	LPDIRECT3DSURFACE9 GetIrradianceDepthStencil() const { return pIrradDS; }
 	LPDIRECT3DSURFACE9 GetEnvDepthStencil() const { return pEnvDS; }
 	LPDIRECT3DSURFACE9 GetBuffer(int id) const { return psgBuffer[id]; }
+	// ORO patch (g): the shader-readable scene depth texture (camera-space linear depth
+	// in .a, cockpit included - filled in RENDERPASS_NORMAL_DEPTH). NULL when SunGlare is
+	// off (bGlares), so callers must degrade. Lets an addon depth-clip its own screen-space
+	// geometry (aurora / reentry plasma) against the real scene instead of painting over it.
+	LPDIRECT3DTEXTURE9 GetDepthTexture() const { return ptgBuffer[GBUF_DEPTH]; }
 	LPDIRECT3DTEXTURE9 GetSunTexture() const { return pSunTex; }
 	LPDIRECT3DTEXTURE9 GetSunGlareAtm() const { return pSunGlareAtm; }
 
@@ -355,6 +364,14 @@ public:
 	float			GetCameraNearPlane() const { return Camera.nearplane; }
 	float			GetCameraAperture() const { return (float)Camera.aperture; }
 	VECTOR3			GetCameraGPos() const { return Camera.pos; }
+	// ORO patch (k): snapshot of the camera the CURRENT frame is being rendered with -
+	// position, rotation and tan(aperture) in the exact form oapiCamera* hand out, but read
+	// AT RENDER TIME. Module pre/post-step hooks both run before Orbiter updates the camera,
+	// so anything a module projects there is one full step stale; world-anchored geometry at
+	// close range (the ORO reentry trail) visibly jumps by one frame of camera travel.
+	// Refreshed by UpdateCameraFromOrbiter at the top of every pass that renders the scene.
+	void			GetRenderCam(VECTOR3* p, MATRIX3* r, double* t) const {
+						*p = Camera.pos; *r = Camera.grot; *t = tan((double)Camera.aperture); }
 	VECTOR3			GetCameraGDir() const { return Camera.dir; }
 	OBJHANDLE		GetCameraProxyBody() const { return Camera.hObj_proxy; }
 	vPlanet *		GetCameraProxyVisual() const { return Camera.vProxy; }

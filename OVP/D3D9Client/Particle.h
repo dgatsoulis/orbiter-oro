@@ -140,6 +140,13 @@ public:
 
 private:
 	OBJHANDLE hPlanet;
+	// ORO patch (o): this stream belongs to an addon that is suppressing the
+	// vessel's stock exhaust, so patch (n)'s gate must not stop it. Stamped from a
+	// LATCH at construction rather than looked up by pointer afterwards -
+	// D3D9ParticleStream has two base classes, and an addon's PSTREAM_HANDLE is a
+	// ParticleStream* while the gate runs with an ExhaustStream*, so a set-of-
+	// pointers exemption is a base-subobject-offset bet. A member cannot miss.
+	bool bExempt;
 };
 
 class ReentryStream: public D3D9ParticleStream {

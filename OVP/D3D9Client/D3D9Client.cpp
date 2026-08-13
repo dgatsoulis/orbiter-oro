@@ -2761,8 +2761,14 @@ void D3D9Client::MakeRenderProcCall(Sketchpad *pSkp, DWORD id, LPD3DXMATRIX pV, 
 			pSkp2->LoadDefaults();
 			if (id == RENDERPROC_EXTERIOR || id == RENDERPROC_PLANETARIUM) {
 				pSkp2->SetViewMode(Sketchpad::USER);
+				// SetViewProj moved inside this branch: the HUD stages invoke this
+				// function with pV = pP = NULL (Scene::RenderMainScene), and
+				// D3D9Pad::SetViewProj dereferences both -> a registered
+				// RENDERPROC_HUD_1ST/HUD_2ND callback crashed the client before the
+				// callback was ever entered. HUD procs draw in the ortho defaults
+				// already established by LoadDefaults(), so they need no view/proj.
+				pSkp2->SetViewProj(pV, pP);
 			}
-			pSkp2->SetViewProj(pV, pP);
 			it->proc(pSkp, it->pParam);
 			pSkp2->FlushAll(); // Flush render queue
 		}

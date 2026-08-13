@@ -2777,7 +2777,28 @@ void D3D9Mesh::RenderShadowMap(const LPD3DXMATRIX pW, const LPD3DXMATRIX pVP, in
 	{
 		if (Grp[g].UsrFlag & 0x2) continue;
 		if (Grp[g].UsrFlag & 0x1) continue;
-		
+
+		// --- ORO patch (f), part 2: TRANSPARENT MATERIALS MUST NOT CAST OPAQUE SHADOWS
+		// A group escapes the shadow map today only by carrying UsrFlag 0x1 (no-shadow)
+		// or 0x2 (skip), and it can only shadow SOFTLY through the OIT path, which needs
+		// UsrFlag 0x20 AND a texture. A mesh that sets none of those - which is most of
+		// them - has every group rasterised as fully opaque no matter how transparent its
+		// material is.
+		//
+		// The stock DeltaGlider is the worked example: deltaglider.msh contains ZERO FLAG
+		// lines, so every UsrFlag is 0, while its `cockpitglass` material carries diffuse
+		// alpha 0.5 (visor 0.5, HUD_glass 0.4) and no texture. The canopy therefore casts
+		// a SOLID shadow - onto its own fuselage in exterior views, and (with part 1 of
+		// this patch feeding the map to the internal pass) across the entire cabin, so no
+		// sunlight can reach the virtual cockpit through the windows at all.
+		//
+		// A binary shadow map cannot express partial occlusion without OIT, so the honest
+		// approximation is: a material that is clearly not opaque does not cast. The
+		// threshold is deliberately high - only genuinely translucent materials are
+		// excused, and a 0.95-alpha decal still shadows as before.
+		if (opt != 1 && Grp[g].MtrlIdx != SPEC_DEFAULT && Grp[g].MtrlIdx < nMtrl
+		    && Mtrl[Grp[g].MtrlIdx].Diffuse.w < 0.9f) continue;
+
 		MeshShader::ps_bools.bOIT = (Grp[g].UsrFlag & 0x20) != 0;
 
 		if (MeshShader::ps_bools.bOIT) {

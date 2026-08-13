@@ -56,6 +56,8 @@ uniform extern bool      gShade;
 uniform extern bool      gClipEn;
 uniform extern bool		 gClearEn;			// Unused
 uniform extern bool		 gEffectsEn;
+uniform extern bool		 gDepthClip;		// ORO patch (g): clip fragments occluded by the scene
+uniform extern texture   gDepthTex;			// ORO patch (g): GBUF_DEPTH (camera-space depth in .a)
 
 
 // ColorKey tolarance
@@ -91,6 +93,17 @@ sampler NoiseS : register(s2) = sampler_state
 	MipFilter = LINEAR;
 	AddressU = WRAP;
 	AddressV = WRAP;
+};
+
+// ORO patch (g): the scene depth buffer, point-sampled (no filtering across depth edges).
+sampler DepthS : register(s3) = sampler_state
+{
+	Texture = <gDepthTex>;
+	MinFilter = POINT;
+	MagFilter = POINT;
+	MipFilter = NONE;
+	AddressU = CLAMP;
+	AddressV = CLAMP;
 };
 
 
@@ -215,6 +228,11 @@ OutputVS OrthoVS(InputVS v)
 
 	outVS.tex = float4(v.dir.xy * gSize.xy, v.dir.xy * gSize.zw);
 
+	// ORO patch (g): carry the vertex's camera depth (POSITION0.z) UNCONDITIONALLY in the
+	// otherwise-unused posW.x (ortho has no clipper), so the depth clip does not depend on
+	// the fnc-gated len branch above.
+	outVS.posW = float4(v.pos.z, 0, 0, 0);
+
 	return outVS;
 }
 
@@ -239,6 +257,11 @@ float4 SketchpadPS(float4 sc : VPOS, OutputVS frg) : COLOR
 	float4 c = frg.color;
 	if (frg.sw[TSW] > 0.2f) c = gPen;
 	if (frg.sw[TSW] > 0.8f) c = t;
+	// ORO patch (l): MODULATE - texture x per-vertex Gouraud colour (SKPSW_TEXMODUL,
+	// byte 26 -> 0.102). The band 0.06..0.14 is occupied by no stock value (0x00 fragment,
+	// 0x80 pen, 0xFF texture), and an unbound texture leaves t = 1, degrading to plain
+	// Gouraud. Placed after the pen/texture lines so it overrides both for its band.
+	if (frg.sw[TSW] > 0.06f && frg.sw[TSW] < 0.14f) c = t * frg.color;
 	if (frg.sw[CSW] > 0.8f) c.a *= f;
 
 	// Color keying
@@ -258,6 +281,22 @@ float4 SketchpadPS(float4 sc : VPOS, OutputVS frg) : COLOR
 		float3 posN = normalize(frg.posW.xyz);
 		if ((dot(gPos,  posN) > gCov.x) && (frg.posW.w > gCov.y)) clip(-1);
 		if ((dot(gPos2, posN) > gCov.z) && (frg.posW.w > gCov.w)) clip(-1);
+	}
+
+	// ORO patch (g): depth clip. frg.len carries this fragment's CAMERA distance (from the
+	// vertex's spare POSITION0.z); GBUF_DEPTH.a holds the scene's camera distance at this
+	// pixel (0 = sky/nothing - only vessels + cockpit are drawn into it). Discard where the
+	// scene surface is nearer than us, so screen-space additive geometry is occluded by the
+	// cockpit and hull. duv = sc.xy / gTarget.zw : gTarget.zw is the SCREEN SIZE (gTarget.xy
+	// is 2/size, for NDC line widths - not the UV scale). The 0.997 slack absorbs fp16 depth
+	// precision and prevents grazing z-fight.
+	if (gDepthClip) {
+		float2 duv = sc.xy / gTarget.zw;             // fragment screen UV (.zw = screen size)
+		float  sd  = tex2D(DepthS, duv).a;           // scene camera-distance at this pixel (0 = sky)
+		// frg.posW.x carries this fragment's camera DISTANCE (POSITION0.z, set unconditionally
+		// in OrthoVS). Discard where the scene surface is nearer, so screen-space additive
+		// geometry sits behind the cockpit / hull. 0.997 absorbs fp16 precision.
+		if (sd > 0.1f && sd < frg.posW.x * 0.997f) clip(-1);
 	}
 
 	if (gEffectsEn) {

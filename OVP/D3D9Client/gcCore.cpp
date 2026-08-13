@@ -42,6 +42,12 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
 	if (strcmp(name,"RegisterSwap")==0) *ppFnc = &gcCore2::RegisterSwap;
 	if (strcmp(name,"FlipSwap")==0) *ppFnc = &gcCore2::FlipSwap;
 	if (strcmp(name,"GetRenderTarget")==0) *ppFnc = &gcCore2::GetRenderTarget;
+	if (strcmp(name,"GetBackBufferHandle")==0) *ppFnc = &gcCore2::GetBackBufferHandle;
+	if (strcmp(name,"CopyResource")==0) *ppFnc = &gcCore2::CopyResource;
+	if (strcmp(name,"SuppressReentry")==0) *ppFnc = &gcCore2::SuppressReentry;
+	if (strcmp(name,"SuppressExhaust")==0) *ppFnc = &gcCore2::SuppressExhaust;
+	if (strcmp(name,"ExemptNewStreams")==0) *ppFnc = &gcCore2::ExemptNewStreams;
+	if (strcmp(name,"SetVCShadows")==0) *ppFnc = &gcCore2::SetVCShadows;
 	if (strcmp(name,"ReleaseSwap")==0) *ppFnc = &gcCore2::ReleaseSwap;
 	if (strcmp(name,"DeleteCustomCamera")==0) *ppFnc = &gcCore2::DeleteCustomCamera;
 	if (strcmp(name,"CustomCameraOnOff")==0) *ppFnc = &gcCore2::CustomCameraOnOff;
@@ -50,6 +56,12 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
 	if (strcmp(name,"SketchpadVersion")==0) *ppFnc = &gcCore2::SketchpadVersion;
 	if (strcmp(name,"CreatePoly")==0) *ppFnc = &gcCore2::CreatePoly;
 	if (strcmp(name,"CreateTriangles")==0) *ppFnc = &gcCore2::CreateTriangles;
+	if (strcmp(name,"CreateTrianglesDepth")==0) *ppFnc = &gcCore2::CreateTrianglesDepth;
+	if (strcmp(name,"HasDepthBuffer")==0) *ppFnc = &gcCore2::HasDepthBuffer;
+	if (strcmp(name,"CreateTrianglesTex")==0) *ppFnc = &gcCore2::CreateTrianglesTex;
+	if (strcmp(name,"UpdateTexture2D")==0) *ppFnc = &gcCore2::UpdateTexture2D;
+	if (strcmp(name,"GetRenderCam")==0) *ppFnc = &gcCore2::GetRenderCam;
+	if (strcmp(name,"GetRenderObjPos")==0) *ppFnc = &gcCore2::GetRenderObjPos;
 	if (strcmp(name,"DeletePoly")==0) *ppFnc = &gcCore2::DeletePoly;
 	if (strcmp(name,"GetTextLength")==0) *ppFnc = &gcCore2::GetTextLength;
 	if (strcmp(name,"GetCharIndexByPosition")==0) *ppFnc = &gcCore2::GetCharIndexByPosition;
@@ -159,9 +171,157 @@ void gcCore::FlipSwap(HSWAP hSwap)
 
 // ===============================================================================================
 //
-SURFHANDLE gcCore::GetRenderTarget(HSWAP hSwap) 
-{ 
+SURFHANDLE gcCore::GetRenderTarget(HSWAP hSwap)
+{
 	return ((gcSwap*)hSwap)->hSurf;
+}
+
+// ===============================================================================================
+// ORO addon (2026): expose the main backbuffer + a mid-scene-safe surface copy so a module
+// can resample the live frame through gcIPInterface (grey-out / blur / tilt).
+//
+SURFHANDLE gcCore::GetBackBufferHandle()
+{
+	return g_client->GetBackBufferHandle();
+}
+
+// ===============================================================================================
+//
+bool gcCore::CopyResource(SURFHANDLE tgt, SURFHANDLE src)
+{
+	if (!tgt || !src) return false;
+	LPDIRECT3DSURFACE9 pts = SURFACE(tgt)->GetSurface();
+	LPDIRECT3DSURFACE9 pss = SURFACE(src)->GetSurface();
+	if (!pts || !pss) return false;
+	// Direct device StretchRect - NO Begin/EndScene wrapper (cf. StretchRectInScene), so this
+	// is callable from inside a render callback. NULL rects = whole-surface copy (also the form
+	// that resolves a multisampled source into a plain texture).
+	return g_client->GetDevice()->StretchRect(pss, NULL, pts, NULL, D3DTEXF_LINEAR) == S_OK;
+}
+
+// ===============================================================================================
+// ORO addon (2026): let a module suppress this client's built-in reentry flames per vessel.
+//
+// WHY THIS EXISTS. Orbiter documents VESSEL::SetReentryTexture(NULL) as suppressing reentry
+// flames, and the inline renderer honours it - Src/Orbiter/Vvessel.cpp gates on
+// vessel->reentry.do_render AND the user's CfgVisualPrm.bReentryFlames option. D3D9Client's
+// vVessel::RenderReentry checks NEITHER: it gates only on its own globally-loaded
+// defreentrytex, so both the documented API and the user's own Launchpad setting are
+// silently ignored here. An addon that wants to REPLACE the reentry visuals therefore has
+// no way to turn the stock billboards off.
+//
+// The proper fix is for RenderReentry to honour do_render, but that flag lives in the
+// core-internal Vessel.h and is not reachable across the client DLL boundary. This is the
+// client-side equivalent: an explicit opt-in list an addon can manage.
+//
+static std::set<OBJHANDLE> g_gcReentrySuppressed;
+
+void gcCore::SuppressReentry(OBJHANDLE hVessel, bool bSuppress)
+{
+	if (!hVessel) return;
+	if (bSuppress) g_gcReentrySuppressed.insert(hVessel);
+	else           g_gcReentrySuppressed.erase(hVessel);
+}
+
+// --- ORO patch (f): virtual-cockpit shadow controls -------------------------------
+// Read by Scene::RenderMainScene's internal pass (declared extern there, the same
+// no-header-churn pattern as gcIsReentrySuppressed above). Defaults reproduce the
+// built-in behaviour, so a client nobody calls behaves exactly as if these did not exist.
+bool  g_gcVCShadows    = true;
+float g_gcVCShadowRad  = 2.2f;   // measured on the stock DeltaGlider, not guessed - the
+                                 // sharpest box that still holds its canopy structure
+
+// ORO patch (p): how much of the material AMBIENT the shadow takes with it, 0..1.
+// 0 = stock (the shadow scales the sun only, so a shadowed VC surface keeps all its
+// ambient and reads as a faint smudge); 1 = the shadow removes the ambient entirely
+// and only emissive plus cockpit lights survive. EMISSIVE IS NEVER SCALED - see the
+// shader comment. Cockpit pass only (Scene.cpp raises and clears it per frame), so
+// exterior shading is untouched at any setting.
+float g_gcVCShadowDep  = 0.0f;
+
+void gcCore::SetVCShadows(bool bEnable, float radius, float depth)
+{
+	g_gcVCShadows   = bEnable;
+	// Clamp rather than trust: the value reaches D3DXMatrixOrthoOffCenterRH, and a zero
+	// or negative box is a degenerate projection.
+	g_gcVCShadowRad = (radius < 0.25f) ? 0.25f : (radius > 50.0f ? 50.0f : radius);
+	// Clamped too, and for a sharper reason: the shader SUBTRACTS depth x ambient from
+	// a sum that also holds emissive, so a value outside 0..1 would either brighten the
+	// shadow or drive the term negative.
+	g_gcVCShadowDep = (depth < 0.0f) ? 0.0f : (depth > 1.0f ? 1.0f : depth);
+}
+
+// Queried by vVessel::RenderReentry (declared extern there - no header churn for one bool).
+bool gcIsReentrySuppressed(OBJHANDLE hVessel)
+{
+	return g_gcReentrySuppressed.find(hVessel) != g_gcReentrySuppressed.end();
+}
+
+// --- ORO patch (n): per-vessel ENGINE-EXHAUST suppression ------------------------
+// The reentry story again, for the exhaust family: an addon drawing its own exhaust
+// visuals (ORO's pressure-dependent plume overlay) has no route to the stock ones.
+// The exhaust list is reachable (GetExhaustCount/DelExhaust/AddExhaust) but rewriting
+// another vessel's list churns indices that vessel's own code may hold, and particle
+// streams are worse - DelExhaustStream needs the PSTREAM_HANDLE only the creating
+// vessel ever received. So the render side is gated here instead: billboards in
+// vVessel::RenderExhaust, stream EMISSION in ExhaustStream::Update (the patch-(e)
+// rule - in-flight particles expire naturally, so lifting suppression releases no
+// backlog burst). Same shape as the reentry set above.
+// SPLIT 2026-08-09: billboards and particle streams suppress INDEPENDENTLY.
+// One flag killed both, which is wrong the moment an addon replaces only one of
+// them - ORO's overlay replaces the billboards while its PARTICLES tab may or
+// may not be replacing the streams. GCEXH_BILLBOARD / GCEXH_STREAM (gcCore.h).
+static std::map<OBJHANDLE, DWORD> g_gcExhaustSuppressed;
+
+void gcCore::SuppressExhaust(OBJHANDLE hVessel, DWORD flags)
+{
+	if (!hVessel) return;
+	if (flags) g_gcExhaustSuppressed[hVessel] = flags;
+	else       g_gcExhaustSuppressed.erase(hVessel);
+}
+
+static DWORD gcExhaustFlags(OBJHANDLE hVessel)
+{
+	std::map<OBJHANDLE, DWORD>::const_iterator it = g_gcExhaustSuppressed.find(hVessel);
+	return (it == g_gcExhaustSuppressed.end()) ? 0 : it->second;
+}
+
+// Queried by vVessel::RenderExhaust (declared extern there): the BILLBOARDS only.
+bool gcIsExhaustSuppressed(OBJHANDLE hVessel)
+{
+	return (gcExhaustFlags(hVessel) & GCEXH_BILLBOARD) != 0;
+}
+
+// Queried by ExhaustStream::Update (declared extern there): the PARTICLE STREAMS only.
+bool gcIsExhaustStreamSuppressed(OBJHANDLE hVessel)
+{
+	return (gcExhaustFlags(hVessel) & GCEXH_STREAM) != 0;
+}
+
+// --- ORO patch (o): a LATCH marking new streams exempt from (n) ------------------
+// (n) is per VESSEL, which is right for hiding what a vessel author shipped and wrong
+// the moment an addon adds its OWN exhaust stream to that same vessel - the
+// replacement would be suppressed along with the thing it replaces. AddParticleStream
+// is not an escape route either: clbkCreateParticleStream is unimplemented in this
+// client, so every usable stream is an ExhaustStream and every ExhaustStream is gated.
+//
+// A LATCH, not a set of stream pointers: the addon raises it, creates its streams,
+// lowers it, and each ExhaustStream stamps a plain bool member at construction. The
+// pointer-set version of this patch did not work - D3D9ParticleStream has TWO base
+// classes, the addon holds a ParticleStream* and the gate runs with an ExhaustStream*,
+// so matching them is a bet on base-subobject offsets. A member cannot miss, and the
+// addon has nothing to clean up.
+static bool g_gcExemptLatch = false;
+
+void gcCore::ExemptNewStreams(bool bExempt)
+{
+	g_gcExemptLatch = bExempt;
+}
+
+// Read by the ExhaustStream constructors (declared extern there).
+bool gcExemptLatch()
+{
+	return g_gcExemptLatch;
 }
 
 // ===============================================================================================
@@ -266,6 +426,109 @@ HPOLY gcCore::CreateTriangles(HPOLY hPoly, const gcCore::clrVtx *pt, int npt, DW
 	if (!hPoly) return new D3D9Triangle(pDev, pt, npt, flags);
 	((D3D9Triangle *)hPoly)->Update(pt, npt);
 	return hPoly;
+}
+
+
+// ORO patch (g): CreateTriangles with a per-vertex camera-space depth (pDepth) for the
+// depth-clip draw path. Identical lifecycle to CreateTriangles - create once, update in
+// place - just threading the depth array through to the vertex buffer's spare .l channel.
+HPOLY gcCore::CreateTrianglesDepth(HPOLY hPoly, const gcCore::clrVtx *pt, const float *pDepth, int npt, DWORD flags)
+{
+	LPDIRECT3DDEVICE9 pDev = g_client->GetDevice();
+	if (!hPoly) return new D3D9Triangle(pDev, pt, npt, flags, pDepth);
+	((D3D9Triangle *)hPoly)->Update(pt, npt, pDepth);
+	return hPoly;
+}
+
+
+// ORO patch (g): does the scene depth buffer exist this session (SunGlare on)?
+bool gcCore::HasDepthBuffer()
+{
+	Scene *pScene = g_client->GetScene();
+	return pScene && (pScene->GetDepthTexture() != NULL);
+}
+
+
+// ORO patch (l): CreateTriangles with TEXTURED vertices (texture x Gouraud colour per
+// fragment) + the optional per-vertex depth of patch (g). Same create-once/update-in-place
+// lifecycle as the other two. The texture is resolved to its D3D9 object here and stored
+// on the poly; DrawPoly binds it through the pad's own texture state machinery.
+HPOLY gcCore::CreateTrianglesTex(HPOLY hPoly, const gcCore::texVtx *pt, const float *pDepth, int npt, DWORD flags, SURFHANDLE hTex)
+{
+	LPDIRECT3DDEVICE9 pDev = g_client->GetDevice();
+	LPDIRECT3DTEXTURE9 pTex = (hTex && SURFACE(hTex)->IsTexture()) ? SURFACE(hTex)->GetTexture() : NULL;
+	if (!hPoly) {
+		D3D9Triangle *pT = new D3D9Triangle(pDev, NULL, npt, flags);
+		pT->SetTex(pTex);
+		if (pt) pT->UpdateTex(pt, npt, pDepth);
+		return pT;
+	}
+	D3D9Triangle *pT = (D3D9Triangle *)hPoly;
+	pT->SetTex(pTex);
+	pT->UpdateTex(pt, npt, pDepth);
+	return hPoly;
+}
+
+
+// ORO patch (l): CPU bytes -> texture surface, via a SYSTEMMEM staging texture and
+// UpdateTexture (the canonical D3D9 upload; the destination is the plain DEFAULT-pool
+// texture oapiCreateSurfaceEx(OAPISURFACE_TEXTURE) creates). Main thread only.
+bool gcCore::UpdateTexture2D(SURFHANDLE hSurf, const void* pBits, int w, int h)
+{
+	if (!hSurf || !pBits || w <= 0 || h <= 0) return false;
+	if (!SURFACE(hSurf)->IsTexture()) return false;
+	LPDIRECT3DTEXTURE9 pTex = SURFACE(hSurf)->GetTexture();
+	if (!pTex) return false;
+
+	D3DSURFACE_DESC desc;
+	if (pTex->GetLevelDesc(0, &desc) != S_OK) return false;
+	if ((int)desc.Width != w || (int)desc.Height != h) return false;
+	if (desc.Format != D3DFMT_X8R8G8B8 && desc.Format != D3DFMT_A8R8G8B8) return false;
+	if (desc.Usage & D3DUSAGE_RENDERTARGET) return false;   // UpdateTexture cannot target a RT
+
+	LPDIRECT3DDEVICE9 pDev = g_client->GetDevice();
+	LPDIRECT3DTEXTURE9 pStage = NULL;
+	// Staging matches the destination's full mip chain so UpdateTexture's level pairing
+	// holds; only level 0 is filled (create surfaces with OAPISURFACE_NOMIPMAPS).
+	if (pDev->CreateTexture(w, h, pTex->GetLevelCount(), 0, desc.Format, D3DPOOL_SYSTEMMEM, &pStage, NULL) != S_OK) return false;
+
+	bool ok = false;
+	D3DLOCKED_RECT lr;
+	if (pStage->LockRect(0, &lr, NULL, 0) == S_OK) {
+		for (int y = 0; y < h; y++)
+			memcpy((BYTE*)lr.pBits + (size_t)y * lr.Pitch, (const BYTE*)pBits + (size_t)y * w * 4, (size_t)w * 4);
+		pStage->UnlockRect(0);
+		ok = (pDev->UpdateTexture(pStage, pTex) == S_OK);
+	}
+	pStage->Release();
+	return ok;
+}
+
+// ===============================================================================================
+// ORO patch (k): the render camera, for CPU projection of world-anchored geometry from
+// inside a render callback. See gcCore.h for why the pre/post-step camera cannot serve.
+bool gcCore::GetRenderCam(VECTOR3* pos, MATRIX3* rot, double* tanAp)
+{
+	if (!pos || !rot || !tanAp) return false;
+	Scene *pScene = g_client->GetScene();
+	if (!pScene) return false;
+	pScene->GetRenderCam(pos, rot, tanAp);
+	return true;
+}
+
+// ===============================================================================================
+// ORO patch (k2): the render-epoch position of a body - the anchor companion to
+// GetRenderCam (see gcCore.h). vObject::gpos is refreshed from oapiGetGlobalPos at
+// render start, in the same breath as the camera, so it IS the frame's number.
+bool gcCore::GetRenderObjPos(OBJHANDLE hObj, VECTOR3* pos)
+{
+	if (!hObj || !pos) return false;
+	Scene *pScene = g_client->GetScene();
+	if (!pScene) return false;
+	vObject *vo = pScene->GetVisObject(hObj);
+	if (!vo) return false;
+	*pos = vo->GlobalPos();
+	return true;
 }
 
 

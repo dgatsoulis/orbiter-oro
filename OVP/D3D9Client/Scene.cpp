@@ -29,6 +29,10 @@
 
 using namespace oapi;
 
+// ORO patch (g): the live scene depth texture, defined in D3D9Pad.cpp and read by
+// D3D9Pad::Flush's depth-clip path. Set here at buffer creation, cleared at teardown.
+extern LPDIRECT3DTEXTURE9 g_gcSceneDepth;
+
 static D3DXMATRIX ident;
 
 const double LABEL_DISTLIMIT = 0.6;
@@ -245,6 +249,10 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
 		HR(pDevice->CreateDepthStencilSurface(viewW, viewH, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, true, &pDepthNormalDS, NULL));
 		HR(D3DXCreateTexture(pDevice, viewW, viewH, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &ptgBuffer[GBUF_DEPTH]));
 	}
+	// ORO patch (g): publish the depth texture for the Sketchpad's depth-clip path
+	// (D3D9Pad::Flush reads this global; it is NULL when the buffer was not created, so the
+	// clip silently no-ops and depth-tagged polys draw as plain additive geometry).
+	g_gcSceneDepth = ptgBuffer[GBUF_DEPTH];
 
 
 	// Initialize post processing effects --------------------------------------------------------------------------------------------------
@@ -328,6 +336,7 @@ Scene::~Scene ()
 	pDevice->SetRenderTarget(2, NULL);
 	pDevice->SetRenderTarget(3, NULL);
 
+	g_gcSceneDepth = NULL;   // ORO patch (g): before the depth texture is released below
 	for (int i = 0; i < ARRAYSIZE(psgBuffer); i++) SAFE_RELEASE(psgBuffer[i]);
 	for (int i = 0; i < ARRAYSIZE(ptgBuffer); i++) SAFE_RELEASE(ptgBuffer[i]);
 	for (int i = 0; i < ARRAYSIZE(pTextures); i++) SAFE_RELEASE(pTextures[i]);
@@ -1246,7 +1255,15 @@ void Scene::RenderMainScene()
 
 	if (!UpdateCamVis()) {
 		if (SUCCEEDED(gc->BeginScene())) {
-			HR(pDevice->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0, 1.0f, 0L));
+			// ORO patch (q) - STOCK BUG. This early-out runs before the scene has a
+			// depth-stencil bound (it is the "focus vessel has no visual yet" path, i.e.
+			// every scenario reload), so asking to clear ZBUFFER|STENCIL here returns
+			// D3DERR_INVALIDCALL, HR() logs it, and the clear does not happen at all -
+			// which is why the intended black loading screen is never painted. Clearing
+			// the TARGET alone is what this line was actually for, it succeeds, and it
+			// removes ~30 D3D9ERROR lines from every reload in every user's log.
+			// Reproducible with no addon loaded.
+			HR(pDevice->Clear(0, NULL, D3DCLEAR_TARGET, 0, 1.0f, 0L));
 			gc->EndScene();
 		}
 		return; // Scene not yet properly inilialized, return
@@ -1956,6 +1973,60 @@ void Scene::RenderMainScene()
 
 	if (oapiCameraInternal() && vFocus) {
 
+		// --- ORO patch (f): SHADOWS IN THE VIRTUAL COCKPIT --------------------
+		// The VC never received shadows, and nothing was actually missing to make it
+		// work. The focus vessel's shadow map is rendered above; then, before the
+		// "remaining vessels" loop, smap.pShadowMap is set to NULL - and THIS pass,
+		// the internal one, runs after that. vVessel::Render binds the map only while
+		// shd->pShadowMap is non-NULL, so gShadowsEnabled was false for every VC draw
+		// and Common.hlsl's ComputeShadow() early-returned "fully lit" for the whole
+		// cabin. An ordering consequence, not an absent feature.
+		//
+		// Re-rendering here rather than stashing the earlier map is deliberate: smap
+		// carries the light's matrices as well as the texture, and with
+		// ShadowMapMode >= 2 the loop above may have left those describing some OTHER
+		// vessel while reusing the same per-LOD render target. Pairing the focus
+		// vessel's texture with a stranger's matrices would project garbage. One extra
+		// shadow pass - only while the camera is inside - refills the whole struct
+		// consistently. (If the cost ever shows, the optimisation is to stash the
+		// entire smap struct after the first call and prove the LOD was not reused.)
+		//
+		// The caster set needs no work whatsoever: RENDERPASS_SHADOWMAP forces
+		// bCockpit = bVC = false in vVessel::Render, so what lands in the map is the
+		// ship's EXTERIOR hull. Sunlight reaching the cabin is therefore cut by the
+		// vessel's own skin and arrives through the window apertures - no window
+		// identification, no per-addon heuristic, just geometry the client already
+		// rasterises every frame. Transparent panes are handled too: the shadow pass
+		// has an OIT variant (SHADER_SHADOWMAP_OIT).
+		//
+		// FIT THE MAP TO THE CABIN, NOT THE HULL. The exterior pass sizes its ortho box
+		// to the vessel's bounding sphere - about 20 m across on a DeltaGlider, which at
+		// ShadowMapSize 2048 is ~1 cm per texel. That is invisible on a fuselage seen from
+		// fifty metres and glaring on a panel forty centimetres from your eye: it is what
+		// makes VC shadow edges stair-step. The camera sits at the ORIGIN of this space
+		// (vObject::mWorld carries the camera-relative translation), so centring there and
+		// shrinking the box to a few metres puts the texels where the eye actually is -
+		// ~4 mm each - while still comfortably containing the canopy frames and nose
+		// structure that do the casting. Shrinking the box also shrinks gSHD[0], hence the
+		// slope-scaled bias in ComputeShadow(), so edges tighten twice over. Geometry
+		// further out stops casting into the cabin, which costs nothing: at 1 cm texels it
+		// was not resolving anything meaningful anyway.
+		// The box half-width and an on/off are exposed through gcCore::SetVCShadows (see
+		// gcCore.cpp) so an addon can A/B the pass and tune the radius per vessel without
+		// a rebuild. Both default to the values below, so a client nobody calls behaves
+		// exactly as if the entry point did not exist.
+		extern bool  g_gcVCShadows;
+		extern float g_gcVCShadowRad;
+		if (Config->ShadowMapMode >= 1 && g_gcVCShadows) {
+			D3DXVECTOR3 ld  = sunLight.Dir;
+			float       rad = min(vFocus->GetBoundingSphereRadius(), g_gcVCShadowRad);
+			// Deliberately NOT the exact origin: RenderShadowMap divides by |pos| to pick
+			// the LOD, and log2f(size / (inf * 1.5f)) would hand int(round(-inf)) straight
+			// to the psShmRT[] index. A centimetre off-centre on a metres-wide box is free.
+			D3DXVECTOR3 pos(0.0f, 0.0f, 0.01f);
+			RenderShadowMap(pos, ld, rad);
+		}
+
 		// switch cockpit lights on, external-only lights off
 		//
 		if (bLocalLight) {
@@ -1975,7 +2046,13 @@ void Scene::RenderMainScene()
 		if (znear>1.0)  znear=1.0;
 		OBJHANDLE hFocus = oapiGetFocusObject();
 		SetCameraFrustumLimits(znear, oapiGetSize(hFocus)*2.0);
+		// ORO patch (p): the shadow may take the material AMBIENT with it, but ONLY
+		// in here. Raised for the cockpit draw and cleared immediately after, so every
+		// exterior pass keeps stock shading no matter what the addon asked for.
+		extern float g_gcVCShadowDep;
+		if (D3D9Effect::eVCShdDepth) D3D9Effect::FX->SetFloat(D3D9Effect::eVCShdDepth, g_gcVCShadowDep);
 		vFocus->Render(pDevice, true);
+		if (D3D9Effect::eVCShdDepth) D3D9Effect::FX->SetFloat(D3D9Effect::eVCShdDepth, 0.0f);
 	}
 
 	pDevice->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
@@ -1984,9 +2061,24 @@ void Scene::RenderMainScene()
 	// End Of Main Scene Rendering ---------------------------------------------
 	//
 
+	// -------------------------------------------------------------------------------------------------------
+	// ORO patch (i): pre-resolve render proc. The complete scene (terrain, vessels,
+	// transparency, VC) is down; the light-blur resolve and the HUD have not run yet, and
+	// the top render target is still the main scene target - the fp16 offscreen buffer
+	// when PostProcess is enabled. Addon art drawn here is therefore composited in HDR
+	// space and participates in the threshold bloom + tonemap below, and always lands
+	// under the HUD/2D overlay. Invoked with NULL matrices: the pad stays in its ortho
+	// pixel-space defaults, the same contract as the HUD stages (see patch (a) note in
+	// MakeRenderProcCall).
+	// -------------------------------------------------------------------------------------------------------
 
-
-
+	{
+		D3D9Pad *pSketch = GetPooledSketchpad(SKETCHPAD_2D_OVERLAY);
+		if (pSketch) {
+			gc->MakeRenderProcCall(pSketch, RENDERPROC_PRE_RESOLVE, NULL, NULL);
+			pSketch->EndDrawing(); // SKETCHPAD_2D_OVERLAY
+		}
+	}
 
 
 
@@ -3406,6 +3498,8 @@ bool Scene::UpdateCameraFromOrbiter(DWORD dwPass)
 
 	oapiCameraGlobalDir(&Camera.dir);
 	oapiCameraRotationMatrix(&grot);
+	Camera.grot = grot;		// ORO patch (k): keep the double-precision rotation for
+							// gcCore::GetRenderCam (mView below is the same, as float)
 	D3DXMatrixIdentity(&Camera.mView);
 	D3DMAT_SetRotation(&Camera.mView, &grot);
 

@@ -633,6 +633,22 @@ float4 TerrainPS(TileVS frg) : COLOR
 
 	cNgt = cMsk.rgb * (1 - Const.CamSpace) * fNgt; // Nightlights surface texture illumination term
 	cNgt2 = cMsk.rgb * Const.CamSpace * 4.0f * fNgt; // Nightlights orbital visibility
+
+	// ORO patch (m), part 2: CLOUDS BLOT THE CITY LIGHTS UNDER THEM. The orbital
+	// lights are rendered 4x overbright into the fp16 chain and then bloomed, so the
+	// night-cloud veil (part 1, CloudPS) cannot visibly dim them - 0.26 x 4 is still
+	// ~1.0, and they punched through anything short of solid overcast. Attenuate at
+	// the SOURCE instead, with the same cloud alpha the day shadows sample (Surfmgr2
+	// now binds the cloud tiles for night tiles too). ~92% blocked under a solid
+	// deck; the remaining leak is the diffuse glow real cities show through cloud.
+#if defined(_CLOUDSHD)
+	if (Flow.bCloudShd) {
+		float fCld = saturate(vUVCld.x < 1.0 ? fChA : fChB);
+		float fBlot = 1.0f - fCld * 0.92f;
+		cNgt *= fBlot;
+		cNgt2 *= fBlot;
+	}
+#endif
 #endif
 
 	float fNoise = (tex2Dlod(tNoise, float4(frg.texUV.xy * 4.0f * Prm.fTgtScale, 0, 0)).r - 0.5f) * ATMNOISE;
@@ -711,6 +727,18 @@ float4 TerrainPS(TileVS frg) : COLOR
 // ============================================================================
 // Planet Cloud Renderer
 // ============================================================================
+
+// ORO patch (m): NIGHT-SIDE CLOUD VISIBILITY, seen from above. Stock multiplies the
+// cloud alpha by the SQUARE of the twilight ramp (AmbientApprox: 1 day -> 0 night, no
+// floor), so night clouds render at alpha 0 - fully invisible - and city lights shine
+// through cloud decks that should blot them out. Real night clouds are conspicuous
+// from orbit precisely as HOLES in the city-light field (and as the canvas lightning
+// lights up). This floors the term with a smooth LERP - day side exactly unchanged
+// (factor 1), night side settling at ORO_NIGHT_CLOUD, no slope kink at the
+// terminator. The cloud RGB stays sun-lit (near black at night), so what appears is a
+// dark veil that dims what is behind it - the real look. Tune by editing the constant
+// and restarting the session (this file compiles at session start; no rebuild).
+#define ORO_NIGHT_CLOUD 0.5f
 
 CldVS CloudVS(TILEVERTEX vrt)
 {
@@ -878,8 +906,11 @@ float4 CloudPS(CldVS frg) : COLOR
 		cTex.rgb += sct.ray.rgb;
 		cTex.rgb *= fECL;
 
-		return float4(sqr(HDR(cTex.rgb * 4.0f)), cTex.a * cAmb.a * cAmb.a);
-	}	
+		// ORO patch (m): stock was cTex.a * cAmb.a * cAmb.a - alpha 0 past the
+		// terminator, night clouds invisible from above. See the note at CloudVS.
+		float fNight = ORO_NIGHT_CLOUD + (1.0f - ORO_NIGHT_CLOUD) * cAmb.a * cAmb.a;
+		return float4(sqr(HDR(cTex.rgb * 4.0f)), cTex.a * fNight);
+	}
 }
 
 

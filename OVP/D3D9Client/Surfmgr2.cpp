@@ -800,7 +800,12 @@ void SurfTile::Render ()
 		rad = rad0 / (double)(2 << lvl); // tile radius
 		has_specular = (ltex != NULL) && sdist < (1.75 + rad);
 		has_lights = (render_lights && ltex && sdist > 1.35);
-		has_shadows = (render_shadows && sdist < (PI05 + rad));
+		// ORO patch (m): bind the cloud tiles for NIGHT tiles too (this was day-side
+		// only, because the textures existed solely for the sun shadows). The terrain
+		// shader now also reads them at night to BLOT the city lights under cloud
+		// (NewPlanet.hlsl, the cNgt block). Day side: nothing changes - the shadow
+		// term still only bites where the sun terms are nonzero.
+		has_shadows = (render_shadows && (sdist < (PI05 + rad) || has_lights));
 	}
 	
 	has_specular &= pShader->bWater;

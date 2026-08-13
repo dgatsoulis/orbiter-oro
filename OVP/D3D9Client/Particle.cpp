@@ -545,6 +545,9 @@ void D3D9ParticleStream::RenderEmissive(LPDIRECT3DDEVICE9 dev)
 
 // =======================================================================
 
+// ORO patch (o): the construction-time latch (gcCore.cpp).
+extern bool gcExemptLatch();
+
 ExhaustStream::ExhaustStream (oapi::GraphicsClient *_gc, OBJHANDLE hV,
 	const double *srclevel, const VECTOR3 *thref, const VECTOR3 *thdir,
 	PARTICLESTREAMSPEC *pss)
@@ -552,6 +555,7 @@ ExhaustStream::ExhaustStream (oapi::GraphicsClient *_gc, OBJHANDLE hV,
 {
 	Attach (hV, thref, thdir, srclevel);
 	hPlanet = 0;
+	bExempt = gcExemptLatch();          // ORO patch (o)
 }
 
 ExhaustStream::ExhaustStream (oapi::GraphicsClient *_gc, OBJHANDLE hV,
@@ -561,7 +565,19 @@ ExhaustStream::ExhaustStream (oapi::GraphicsClient *_gc, OBJHANDLE hV,
 {
 	Attach (hV, ref, _dir, srclevel);
 	hPlanet = 0;
+	bExempt = gcExemptLatch();          // ORO patch (o)
 }
+
+// ORO patch (n): the per-vessel exhaust suppression (gcCore.cpp) covers the exhaust
+// PARTICLE streams too - the billboard gate alone would leave smoke and contrails
+// puffing from an engine whose flame an addon has replaced. Suppression stops
+// EMISSION only: particles already in flight expire naturally (the patch-(e) rule -
+// suppressed vessels fall through to the else below, which resets t0, so lifting the
+// suppression does not release a burst of backlogged particles).
+extern bool gcIsExhaustStreamSuppressed(OBJHANDLE hVessel);
+// ORO patch (o): ... unless THIS stream was exempted (an addon's own replacement
+// stream, added to a vessel whose stock exhaust it is suppressing).
+extern bool gcExemptLatch();
 
 void ExhaustStream::Update ()
 {
@@ -635,7 +651,8 @@ void ExhaustStream::Update ()
 		}
 	}
 
-	if (level && *level > 0 && vessel && (alpha0 = Level2Alpha(*level) * Atm2Alpha (vessel->GetAtmDensity())) > 0.01) {
+	if (level && *level > 0 && vessel && (!gcIsExhaustStreamSuppressed(hRef) || bExempt)
+	    && (alpha0 = Level2Alpha(*level) * Atm2Alpha (vessel->GetAtmDensity())) > 0.01) {
 		if (simt > t0+interval) {
 			VECTOR3 vp, vv;
 			MATRIX3 vR;
@@ -779,6 +796,13 @@ void ReentryStream::SetMaterial (D3DCOLORVALUE &col)
 	col.b = 0.5f;
 }
 
+// ORO patch (e): the per-vessel reentry suppression (gcCore.cpp) must cover the
+// reentry PARTICLE streams too - the core hands EVERY vessel a default "plasmastream"
+// (Vessel::SetDefaultReentryStream), and vessels like Atlantis add their own, so an
+// addon replacing the reentry visuals gets orphan puffs from ~95 km without this.
+// Suppression stops EMISSION only: particles already in flight expire naturally.
+extern bool gcIsReentrySuppressed(OBJHANDLE hVessel);
+
 void ReentryStream::Update ()
 {
 	D3D9ParticleStream::Update ();
@@ -816,7 +840,9 @@ void ReentryStream::Update ()
 		}
 	}
 
-	if (friction > 0 && (alpha0 = Atm2Alpha (friction)) > 0.01) {
+	if (friction > 0 && !gcIsReentrySuppressed(hRef) && (alpha0 = Atm2Alpha (friction)) > 0.01) {
+		// (suppressed vessels fall through to the else, which resets t0 - so lifting
+		// the suppression does not release a burst of backlogged particles)
 		if (simt > t0+interval) {
 			VECTOR3 vp, vv, av;
 			vessel->GetGlobalPos (vp);

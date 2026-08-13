@@ -283,8 +283,13 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 	// ======================================================================
 	// Add vessel self-shadows
 	// ======================================================================
+	float fAmbShd = 1.0f;         // ORO patch (p): ambient survival in shadow
 #if SHDMAP > 0
-	cSun *= smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
+	{
+		float fShd = smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
+		cSun *= fShd;
+		fAmbShd = lerp(1.0f, fShd, gVCShdDepth);
+	}
 #endif
 	
 
@@ -345,7 +350,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 	// Add a faint diffuse hue for rough metals. Rough metal doesn't look good if it's totally black
 	fA += fRgh * fMetal * 0.05f;
 
-	float3 zD = cDiff.rgb * fA * LightFXSq(Sq(cSun * fR * dLN) + cDiffLocal + Sq(cAmbient) + Sq(gMtrl.emissive.rgb));
+	float3 zD = cDiff.rgb * fA * LightFXSq(Sq(cSun * fR * dLN) + cDiffLocal + Sq(cAmbient * fAmbShd) + Sq(gMtrl.emissive.rgb));
 
 	// Combine specular terms
 	// float3 zS = cS * (cSun * dLN) + cSpec * LightFX(cSpecLocal) * 0.5f;
