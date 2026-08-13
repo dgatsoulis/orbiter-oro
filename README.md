@@ -1,3 +1,21 @@
+> ### ⚠️ This is a fork, not Orbiter itself
+>
+> It exists to publish the `D3D9Client` changes required by the **ORO** addon
+> (Orbiter Realism Overhaul), as the GPL v3 / LGPL v3 licence of that client requires,
+> and so the graphics client ORO ships can be independently verified or rebuilt.
+>
+> **The changes are on the [`oro-patches`](../../tree/oro-patches) branch — see
+> [ORO_PATCHES.md](./ORO_PATCHES.md).** `main` is untouched upstream Orbiter.
+>
+> This is **not** a maintained Orbiter distribution and no support is offered for it.
+> For Orbiter itself, go to [orbitersim/orbiter](https://github.com/orbitersim/orbiter).
+> Orbiter is Martin Schweiger's work and D3D9Client is Jarmo Nikkanen's; this fork adds
+> to them, and claims neither.
+>
+> *The rest of this README is upstream's, unchanged.*
+
+---
+
 ![Orbiter logo](./Src/Orbiter/Bitmaps/banner.png)
 
 # Orbiter Space Flight Simulator
