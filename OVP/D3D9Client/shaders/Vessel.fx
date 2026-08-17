@@ -143,7 +143,12 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
 
 
 	// Lit the diffuse texture
+	// ORO patch (r): same emissive-overdrive fix as PBR.fx - see the long note there. This
+	// is the LEGACY path (SHADER_LEGACY); a plain mesh defaults to SHADER_PBR, so this copy
+	// exists so the behaviour does not depend on which shader a given mesh happens to take.
+	float3 cAlbedo = cTex.rgb;			// texture colour before lighting
 	cTex.rgb *= saturate(Base + gMtrl.diffuse.rgb * Light_fx(cDiffLocal + cSun * dLN));
+	cTex.rgb += cAlbedo * max(gMtrl.emissive.rgb - 1.0f, 0.0f);
 
 	// Lit the specular surface
 	cSpec.rgb *= saturate(cSpecLocal + fSun * cSun);

@@ -28,7 +28,7 @@ git diff 2024..oro-patches
 
 ## What changed
 
-Seventeen patches, lettered (a)–(g) and (i)–(q) to match ORO's own documentation.
+Eighteen patches, lettered (a)–(g) and (i)–(r) to match ORO's own documentation.
 
 **New capability for addons** — things the client could not previously do:
 
@@ -62,6 +62,7 @@ with **no addon loaded at all**:
 | (m) ★ | Night clouds. From-above night clouds render at `alpha × twilight²`, which is exactly zero past the terminator; cloud tiles bind day-side only; orbital city lights draw 4× overbright. |
 | (q) ★ | The reload "Clear storm". On the *focus vessel has no visual yet* path the client clears `ZBUFFER\|STENCIL` with no depth-stencil bound, failing `D3DERR_INVALIDCALL` around thirty times per scenario reload. Clearing `TARGET` alone succeeds — and paints the black loading screen the line was always meant to paint. |
 | (f) part 2 ★ | Self-shadowing treats a 0.5-alpha untextured group as fully opaque, so the stock DeltaGlider's canopy casts a solid shadow on its own fuselage in exterior views. |
+| (r) ★ | Material emissive is clamped. Both vessel shaders fold `gMtrl.emissive` into the light term and then `saturate()` it (`Light_fx()` in `Common.hlsl` is literally `return saturate(x)`), and that term *multiplies* the texture — so **a surface can never be brighter than its own texture**, no emissive value above 1.0 does anything, and nothing authored this way can ever reach the bloom pass. An addon driving emissive to 3.19 and one driving it to 1.0 render identically, and because all three channels clamp together the tint is erased too. Fixed by re-applying the excess additively, modulated by the albedo, so a texture's dark bands stay dark. Stock content cannot move: the term is exactly zero at or below 1.0. |
 
 ## Building
 

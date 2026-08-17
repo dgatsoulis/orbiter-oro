@@ -270,7 +270,19 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 	if (gNoColor) cDiff.rgb = 1;
 
 	// ------------------------------------------------------------------------
+	float3 cAlbedo = cDiff.rgb;			// ORO patch (r): texture colour before lighting
 	cDiff.rgb *= diffBaked;				// Lit the texture
+	// ORO patch (r): THE EMISSIVE OVERDRIVE.
+	// Light_fx() above is a plain saturate(), so everything a material emissive carries
+	// past 1.0 was being discarded. An addon driving hot metal deliberately past the
+	// bloom threshold therefore got a flat, fully-lit copy of its own texture - identical
+	// at every setting above ~0.3, with its colour ramp erased (all three channels clamp
+	// together, so the result is untinted) and no way to reach the light-glow pass at all.
+	// The excess is re-applied here as an ADDITIVE term, modulating the albedo so a
+	// texture's dark areas stay dark and its banding survives.
+	// STOCK CONTENT CANNOT MOVE: max() is exactly zero for any emissive at or below 1.0,
+	// which is everything an authored mesh carries.
+	cDiff.rgb += cAlbedo * max(gMtrl.emissive.rgb - 1.0f, 0.0f);
 	cDiff.a *= gMtrlAlpha;				// Modulate material alpha
 
 
