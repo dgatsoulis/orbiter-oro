@@ -111,6 +111,13 @@ struct PerObjectParams
 	float	 fTgtScale;
 };
 
+uniform extern float gWet;            // ORO patch (s): ground wetness, 0..1
+uniform extern float gStorm;          // ORO patch (s) part 2: overcast factor, 0..1
+uniform extern float gWetDark;        // ORO patch (s) part 3: wet albedo darkening gain
+uniform extern float4 gWetReflPrm;    // ORO patch (s) part 6: 1/W, 1/H, gain, live
+uniform extern float4 gWetSwimPrm = {1, 1, 1, 1};  // ORO patch (s): swim amp, swim rate, pool size, pool reach
+uniform extern float4 gWetGrainPrm = {1, 1, 0, 0}; // ORO patch (s) part 7: grain opacity, grain size
+sampler tWetRefl;                     // ORO patch (s) part 6: the planar mirror
 uniform extern PerObjectParams Prm;
 uniform extern FlowControlPS Flow;
 uniform extern FlowControlVS FlowVS;
@@ -386,7 +393,23 @@ float GGX_NDF(float dHN, float rgh)
 }
 
 
-float4 TerrainPS(TileVS frg) : COLOR
+// ORO patch (s), round 12: the pool grain's value noise - periodic (the wrap) so the
+// seam law holds, static in the world (no clock).
+float OroGrainHash(float2 c, float wrap)
+{
+	c = fmod(c, wrap);
+	return frac(sin(dot(c, float2(127.1f, 311.7f))) * 43758.5453f);
+}
+float OroGrainNoise(float2 p, float wrap)
+{
+	float2 i = floor(p), f = frac(p);
+	f = f * f * (3.0f - 2.0f * f);
+	float a = OroGrainHash(i, wrap),                b = OroGrainHash(i + float2(1, 0), wrap);
+	float c = OroGrainHash(i + float2(0, 1), wrap), d = OroGrainHash(i + float2(1, 1), wrap);
+	return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+
+float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
 {
 
 	float2 vUVSrf = frg.texUV.xy * Prm.vTexOff.zw + Prm.vTexOff.xy;
@@ -607,6 +630,7 @@ float4 TerrainPS(TileVS frg) : COLOR
 	fLvl *= fECL;	// Apply eclipse
 
 	float3 color = cTex.rgb * LightFX(max(fLvl, 0) * fShadow + cDiffLocal);
+
 	return float4(pow(saturate(color * Const.TrExpo), Const.TrGamma), 1.0f);		// Gamma corrention
 #else
 
@@ -694,6 +718,12 @@ float4 TerrainPS(TileVS frg) : COLOR
 	// Bake light and shadow terms
 	float3 cL = cSF * fD * fShadow * fShd;
 
+	// ORO patch (s) part 2: overcast. The DIRECTIONAL term collapses and the ambient
+	// lifts, which is what a storm deck actually does to the light - shadows and the
+	// warm cast go with it, instead of a post-process dimming the finished frame.
+	cL *= (1.0f - gStorm);
+	cA *= (1.0f + gStorm * 2.2f);
+
 	// Lit the texture with various things
 	cTex.rgb *= cL * 2.0f + (cA + cDiffLocal + Const.cAmbient * Const.Ambient) * saturate(1.0f + fG + fZ) + cNgt;
 
@@ -703,14 +733,157 @@ float4 TerrainPS(TileVS frg) : COLOR
 	cTex.rgb += cRfl * 0.75f;
 
 	// Add Specular component
-	cTex.rgb += cSun * fSpe * smoothstep(-0.001f, 0.03f, fDPS);
+	cTex.rgb += cSun * fSpe * smoothstep(-0.001f, 0.03f, fDPS) * (1.0f - gStorm);   // ORO patch (s) part 2
 
 	// Amplify cloud shadows for orbital views
 	float fOrbShd = 1.0f - (1.0f - fShd) * Const.CamSpace * 0.5f;
 
+	// ORO patch (s): WET TERRAIN. See Mesh.fx's BaseTilePS for the full reasoning.
+	// ⚠️ It goes in BEFORE the haze and the eclipse, so wet ground is still attenuated by
+	// the atmosphere exactly like dry ground - putting it after would have made distant
+	// wet terrain punch through the aerial perspective. Exactly zero at gWet 0, so stock
+	// content cannot move.
+	if (gWet > 0.001f) {
+		// ORO patch (s) part 7: STANDING POOLS ON THE TERRAIN - his brief, verbatim:
+		// patches all around the vessel, different sizes, that STAY IN PLACE as the
+		// vessel moves, new ones appearing ahead and old ones dropping behind. All of
+		// that is a COORDINATE CHOICE, not machinery: the lattice lives in the water-
+		// microtexture UV mapping (Prm.vMicroOff, WITHOUT line 401's ocean time drift),
+		// which the client already keeps continuous across tiles and LODs so the water
+		// microtexture is seamless - so the pools are pinned to the ground by
+		// construction and the vessel simply drives across them. Spawn/cull for free.
+		// Same two-scale sine lattice as the base tiles (BaseTilePS), so runway and
+		// apron pool by one law; the two K constants are the pool-size calibration
+		// and are a fly-and-report number, not a derivation.
+		// Part 7 round 2: THREE lattice scales (the coarse one shifts the fine
+		// threshold regionally - sheets here, speckle there: the size variety), the
+		// Pool size slider (gWetSwimPrm.z) scaling all three, pools STARTING at 70%
+		// rain (his spec - ground soaks first, water stands later), and a Pool reach
+		// distance e-fold (gWetSwimPrm.w, ~900 m at 1) so the far field blends out
+		// instead of patterning to the horizon.
+		// SEAMLESS LATTICE (round 3: he screenshotted the seams). The micro-UV
+		// mapping agrees across tiles and LODs only MODULO 1 - all a wrapping
+		// texture needs - so fractional-cycle sinusoids jumped phase at every tile
+		// boundary. Integer cycles per UV unit (TAU x QK) make the lattice
+		// 1-periodic, so a mod-1 jump lands on the same value: no seam, by
+		// construction. frac() bounds the sin arguments (precision), legal only
+		// because of that same periodicity. The slider quantizes to whole cycles.
+		// ROUND 3 ("too squarish, a bit geometric"): the old lattice was a PRODUCT of
+		// axis-aligned sinusoids, and x-waves times y-waves can only make rectilinear
+		// cells - the maze he screenshotted. It is now an INTERFERENCE SUM of plane
+		// waves at spread angles - how isotropic-looking noise is built from periodic
+		// parts - so the blobs come out ROUNDED and quasi-random.
+		// ⚠️ THE SEAM LAW HOLDS: every wave-vector COMPONENT is an integer number of
+		// cycles per UV unit (signed quantizer QS), so the field stays 1-periodic and
+		// a mod-1 tile jump lands on the same value. The phases are free randomizers.
+		float2 vUVPool = frg.texUV.xy * Prm.vMicroOff.zw + Prm.vMicroOff.xy;
+		float  poolK = 1.0f / max(0.35f, gWetSwimPrm.z);
+	#define QS(k) (((k) < 0.0f) ? -max(1.0f, floor(-(k) * poolK + 0.5f)) : max(1.0f, floor((k) * poolK + 0.5f)))
+		float2 uvT = frac(vUVPool) * 6.2831853f;
+		float  p1 = (sin(uvT.x * QS(50.0f)  + uvT.y * QS(17.0f)  + 1.3f)
+		           + sin(uvT.x * QS(21.0f)  + uvT.y * QS(47.0f)  + 4.1f)
+		           + sin(uvT.x * QS(-33.0f) + uvT.y * QS(40.0f)  + 2.6f)
+		           + sin(uvT.x * QS(45.0f)  + uvT.y * QS(-27.0f) + 5.5f)) * 0.42f;
+		float  p2 = (sin(uvT.x * QS(9.0f)   + uvT.y * QS(4.0f)   + 0.7f)
+		           + sin(uvT.x * QS(-5.0f)  + uvT.y * QS(10.0f)  + 3.9f)
+		           + sin(uvT.x * QS(11.0f)  + uvT.y * QS(-2.0f)  + 2.2f)) * 0.55f;
+		float  p3 = (sin(uvT.x * QS(3.0f)   + uvT.y * QS(1.0f)   + 1.9f)
+		           + sin(uvT.x * QS(-1.0f)  + uvT.y * QS(3.0f)   + 5.0f)
+		           + sin(uvT.x * QS(2.0f)   + uvT.y * QS(-2.0f)  + 0.4f)) * 0.55f;
+		// GRAIN IN THE REFLECTION (round 12 - the cell flecks were circular dots that
+		// jumped state; his circled reference areas are fine IRREGULAR broken-water
+		// texture). Two octaves of continuous value noise, thresholded so only the
+		// upper patches dig into the reflection - irregular connected blotches,
+		// STATIC in the world (no migration, his call), periodic (seam law).
+		// the two user knobs: opacity scales the knockout depth; size rescales the
+		// lattice - QUANTIZED to whole cells per period so the seam law survives it
+		float  GNq = max(16.0f, floor(512.0f / max(0.35f, gWetGrainPrm.y) + 0.5f));
+		float2 guv = frac(vUVPool) * GNq;
+		float  gn  = 0.62f * OroGrainNoise(guv, GNq)
+		           + 0.38f * OroGrainNoise(guv * 2.0f, GNq * 2.0f);
+		float  gran = 1.0f - saturate(0.85f * gWetGrainPrm.x) * smoothstep(0.52f, 0.78f, gn);
+	#undef QS
+		float  pud = saturate(p1 * 1.30f - 0.16f + 0.30f * gWet + p3 * 0.35f)
+		           * saturate(p2 * 1.10f + 0.35f + 0.25f * gWet);
+		pud = saturate(pud * 1.6f) * saturate((gWet - 0.70f) / 0.30f);
+		pud *= exp(-dst / (90.0f + 780.0f * gWetSwimPrm.w * gWetSwimPrm.w));
+
+		cTex.rgb *= saturate(lerp(1.0f, 1.0f - 0.494f * gWetDark, gWet));   // recalibrated x2: full track = old 0..1.3
+		cTex.rgb *= saturate(lerp(1.0f, 1.0f - 0.85f  * gWetDark, pud));    // standing water, darker still
+		float fresW = pow(1.0f - saturate(dot(nvrW, -vRay)), 5.0f);
+		cTex.rgb = lerp(cTex.rgb, cTex.rgb * 1.7f + 0.02f, saturate(fresW * 0.5f * gWet));
+
+		// THE SKY IN THE WATER FILM (look round 2). The terrain had NO sky reflection -
+		// only the vessel image - which is why his pools showed ships but never the
+		// grey overcast the reference is full of. The film lerps toward the same
+		// storm-sky grey the fog uses, scaled by the daylight factor so night pools
+		// stay dark; the pools read as light patches against the darkened ground.
+		// Part 7: the POOLS mirror the sky strongly at ANY viewing angle - standing
+		// water, the base tiles' repartition law - which is what makes them read as
+		// light patches against the darkened apron from a standing camera.
+		{
+			float3 cSkyT = float3(0.42f, 0.45f, 0.49f) * saturate(cAmb.a * 1.3f)
+			             * (1.0f + gStorm * 0.35f);
+			float  skyF = saturate(saturate((0.30f + 0.70f * fresW) * gWet) * 0.60f
+			                     + (0.55f + 0.45f * fresW) * pud * 0.80f * gran);
+			cTex.rgb = lerp(cTex.rgb, cSkyT, skyF);
+
+			// POOL SPECULAR (part 7 round 3, his ask): standing water answers CAMERA
+			// MOVEMENT - two lobes on the shader's own Blinn half-vector (hlvW, the
+			// idiom the stock ground specular uses). The tight lobe is direct sun on
+			// water and collapses with the storm like every directional term; the
+			// BROAD lobe is the bright cloud around the hidden sun and GROWS with the
+			// storm, so pools keep flashing under full overcast. Night: the sun term
+			// gates on the stock horizon smoothstep, the sky term goes dark through
+			// cSkyT's daylight factor. Scaled by pud alone - damp ground has no free
+			// water surface to mirror a light source.
+			float pDHN  = saturate(dot(hlvW, nvrW));
+			float spSun = pow(pDHN, 90.0f) * (1.0f - gStorm)
+			            * smoothstep(-0.001f, 0.03f, fDPS);
+			float spSky = pow(pDHN, 8.0f) * (0.30f + 0.70f * gStorm);
+			cTex.rgb += (cSun * spSun * 2.2f + cSkyT * spSky * 0.9f)
+			          * pud * (0.35f + 0.65f * fresW);
+		}
+
+		// THE VESSEL IMAGE IN THE WET GROUND (ORO patch (s) part 6) - terrain edition.
+		// Same half-res mirror the base tiles sample; the film above supplies the sky,
+		// this supplies the ships. Fast shimmer on Const.Time directly - the previous
+		// wobble rode vUVWtr (time/180) at aurora pace, the third recurrence of that
+		// critique; rain-pocked water flickers at a few Hz. LOOK ROUND 3 ("the
+		// reflection swings too far"): a jitter, not a wave. LOOK ROUND 4: amplitude
+		// and cadence are HIS - gWetSwimPrm (x amp, y rate; 1 = this baseline), the
+		// Swim size / Swim rate sliders. Part 7: the image concentrates in the POOLS
+		// (mild 0.70 film + strong pud term), which is what the reference shows -
+		// ships mirrored in the puddles, not evenly across damp ground.
+		if (gWetReflPrm.w > 0.5f) {
+			float2 ruv = (sc.xy + 0.5f) * gWetReflPrm.xy;
+			ruv.x = 1.0f - ruv.x;              // undo the mirror pass's clip-space X flip
+			ruv += float2(sin(Const.Time * 10.8f * gWetSwimPrm.y + vUVSrf.x * 43.0f),
+			              cos(Const.Time *  8.5f * gWetSwimPrm.y + vUVSrf.y * 43.0f))
+			     * (0.0007f * gWetSwimPrm.x);
+			float  smr = gWetReflPrm.y * 3.2f;
+			float4 cVes = tex2D(tWetRefl, ruv) * 0.5f
+			            + tex2D(tWetRefl, ruv + float2(0, smr)) * 0.3f
+			            + tex2D(tWetRefl, ruv + float2(0, smr * 2.5f)) * 0.2f;
+			float  rStr = cVes.a * saturate(0.30f + 2.2f * fresW)
+			            * saturate(0.70f * gWet + 1.25f * pud) * 0.85f * gWetReflPrm.z * gran;
+			cTex.rgb = lerp(cTex.rgb, cVes.rgb, saturate(rStr));
+		}
+	}
+
 	// Add Haze and night lights
 	cTex.rgb *= sct.atn.rgb;
 	cTex.rgb += (sct.ray.rgb * RayPhase(-fDRS) + sct.mie.rgb * MiePhase(-fDRS)) * fOrbShd * (1.0f + fNoise);
+
+	// ORO patch (s) part 2: STORM FOG. Visibility collapses under heavy rain; exponential
+	// in the pixel distance (dst), toward a grey scaled by the ambient daylight factor so
+	// it stays dark at night. Sits after the atmospheric haze - storm fog dominates it -
+	// and before the eclipse, which still darkens everything. Zero at gStorm 0.
+	if (gStorm > 0.001f) {
+		float  ffog = (1.0f - exp(-dst * 0.00045f)) * saturate(gStorm * 1.4f);
+		float3 cFog = float3(0.40f, 0.43f, 0.47f) * saturate(cAmb.a * 1.2f);
+		cTex.rgb = lerp(cTex.rgb, cFog, ffog);
+	}
 
 	cTex.rgb *= fECL;	// Apply eclipse
 	cTex.rgb += cNgt2;

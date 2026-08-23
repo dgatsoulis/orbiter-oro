@@ -491,6 +491,68 @@ ote An addon MUST clear its exemptions on unload.
 	gc_interface void SetVCShadows(bool bEnable, float radius, float depth);
 
 	/**
+	* rief ORO patch (s): how WET the ground looks, 0 = dry, 1 = soaked.
+	* \param wet wetness, clamped to 0..1.
+	* 
+ote Orbiter has no weather, so an addon cannot put water on the ground itself -
+	*   the surface is drawn by the client, in two different places (base tiles through
+	*   Mesh.fx's BaseTile technique, terrain through NewPlanet.hlsl). This hands both of
+	*   them one number. Same shape as SetVCShadows: the addon does not draw anything, it
+	*   sets client state, and 0 is exactly stock behaviour.
+	*/
+	gc_interface void SetSurfaceWetness(float wet);
+
+	/**
+	* rief ORO patch (s), part 2: STORM LIGHT. 0 = clear sky (stock), 1 = full overcast.
+	* \param k overcast factor, clamped to 0..1.
+	* 
+ote This is what actually makes a rainstorm look like one. A post-process can only
+	*   darken the finished frame; the sharp sun shadows, the speculars and the warm
+	*   directional light are already baked into every pixel by then. This factor collapses
+	*   the DIRECTIONAL sun into a lifted ambient at the source (consumed in the deployed
+	*   shaders), fades the projected ground shadows, and kills the sun glare - so the
+	*   world goes flat and grey the way it does under a real deck, instead of dim.
+	*/
+	gc_interface void SetStormLight(float k);
+
+	/**
+	* rief ORO patch (s), part 3: how far the wet ground DARKENS. 1 = the shipped look,
+	*   0 = wetness without darkening, 2 = near-black pools. Clamped to 0..2.
+	* 
+ote A taste knob on the albedo term only - the mirror and the puddle mask ride
+	*   SetSurfaceWetness as before.
+	*/
+	gc_interface void SetWetDarkness(float k);
+
+	/**
+	* rief ORO patch (s), part 5: gain on the rain-drop GLINT on hulls. 1 = designed,
+	*   0 = off, 2 = double. Clamped to 0..2.
+	*/
+	gc_interface void SetWetGlint(float k);
+
+	/**
+	* \brief ORO patch (s), part 6: gain on the wet-ground planar REFLECTION (the
+	*   vessel image in the puddles). 1 = designed, 0 = off. Clamped to 0..2.
+	* \param fSwimAmp Ripple-warp amplitude scale on the reflected image, 1 = designed,
+	*   0 = a still mirror. Clamped to 0..2.
+	* \param fSwimRate Ripple cadence scale, 1 = designed. Clamped to 0..2.
+	* \param fPoolSize Standing-pool lattice scale, 1 = designed, bigger = larger pools.
+	*   Clamped to 0..2.
+	* \param fPoolReach Pool visibility distance scale, 1 = designed (~900 m e-fold),
+	*   0 = camera vicinity only. Clamped to 0..2.
+	*/
+	gc_interface void SetWetReflection(float k, float fSwimAmp, float fSwimRate, float fPoolSize, float fPoolReach);
+
+	/**
+	* \brief ORO patch (s) part 7: the pool-grain controls - the broken-water texture
+	*   inside the standing pools' reflections.
+	* \param fOpacity How deeply the grain digs into the reflection. 1 = designed,
+	*   0 = uniform pools. Clamped to 0..2.
+	* \param fSize Grain feature size scale. 1 = designed, bigger = coarser. Clamped 0..2.
+	*/
+	gc_interface void SetWetGrain(float fOpacity, float fSize);
+
+	/**
 	* \brief Release a swap object after it's no longer needed.
 	* \param hSwap Handle to a swap object.
 	*/

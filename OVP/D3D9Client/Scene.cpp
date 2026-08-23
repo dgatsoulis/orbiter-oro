@@ -84,6 +84,10 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
 	pOffscreenTarget = NULL;
 	pLocalCompute = NULL;
 	pRenderGlares = NULL;
+	ptWetRefl = NULL;
+	psWetRefl = NULL;
+	psWetReflDS = NULL;
+	bWetReflLive = false;
 	pCreateGlare = NULL;
 	viewH = h;
 	viewW = w;
@@ -184,6 +188,15 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
 	fs.close();
 
 	CreateSunGlare();
+
+	// ------------------------------------------------------------------------------
+	// ORO patch (s) part 6: the WET-GROUND PLANAR REFLECTION target. Half resolution -
+	// the image lands in rippling puddles through a mask, so full res would buy nothing.
+	// Created unconditionally (~2 MB); the PASS that fills it is gated on wetness, so a
+	// dry world never pays a frame cost.
+	HR(pDevice->CreateTexture(viewW / 2, viewH / 2, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &ptWetRefl, NULL));
+	if (ptWetRefl) HR(ptWetRefl->GetSurfaceLevel(0, &psWetRefl));
+	HR(pDevice->CreateDepthStencilSurface(viewW / 2, viewH / 2, D3DFMT_D24X8, D3DMULTISAMPLE_NONE, 0, true, &psWetReflDS, NULL));
 
 
 	// ------------------------------------------------------------------------------
@@ -358,6 +371,9 @@ Scene::~Scene ()
 	SAFE_RELEASE(pIrradTemp2);
 	SAFE_RELEASE(pIrradTemp3);
 	SAFE_RELEASE(pDepthNormalDS);
+	SAFE_RELEASE(psWetRefl);
+	SAFE_RELEASE(ptWetRefl);
+	SAFE_RELEASE(psWetReflDS);
 	SAFE_RELEASE(pLocalResults);
 	SAFE_RELEASE(pLocalResultsSL);
 	SAFE_RELEASE(pSunTex);
@@ -1269,6 +1285,33 @@ void Scene::RenderMainScene()
 		return; // Scene not yet properly inilialized, return
 	}
 
+	// ORO patch (s): ground wetness, pushed ONCE PER FRAME into the shared effect so every
+	// shader in it can read gSurfWet - base tiles for the ground, and the vessel shaders
+	// for a wet hull. Pushing it only in RenderBaseTile (where it started) left the value
+	// stale or unset for everything else in the frame. 0 is stock, so this line changes
+	// nothing until an addon asks for it.
+	{
+		extern float g_gcSurfaceWet;
+		extern float g_gcStormLight;
+		extern float g_gcWetDark;
+		if (D3D9Effect::eSurfWet) D3D9Effect::FX->SetFloat(D3D9Effect::eSurfWet, g_gcSurfaceWet);
+		if (D3D9Effect::eStorm)   D3D9Effect::FX->SetFloat(D3D9Effect::eStorm,   g_gcStormLight);
+		if (D3D9Effect::eWetDark) D3D9Effect::FX->SetFloat(D3D9Effect::eWetDark, g_gcWetDark);
+		// REAL time for the drop-sparkle animation (a blink stays a blink at 100x warp) -
+		// but ACCUMULATED only while the sim runs, because raw system time kept the hull
+		// glint dancing through a pause while the rain streaks (ORO's clock, which stops
+		// with clbkPreStep) hung frozen mid-air: two clocks, one scene, visibly absurd.
+		// His report. Wrapped hourly so float precision never decays.
+		{
+			static double wetT = 0.0, wetLast = -1.0;
+			const double now = oapiGetSysTime();
+			if (wetLast >= 0.0 && !oapiGetPause()) wetT += now - wetLast;
+			wetLast = now;
+			if (D3D9Effect::eWetTime) D3D9Effect::FX->SetFloat(D3D9Effect::eWetTime, (float)fmod(wetT, 3600.0));
+		}
+		{ extern float g_gcWetGlint; if (D3D9Effect::eWetGlint) D3D9Effect::FX->SetFloat(D3D9Effect::eWetGlint, g_gcWetGlint); }
+	}
+
 
 	// Update Vessel Animations
 	//
@@ -1453,6 +1496,152 @@ void Scene::RenderMainScene()
 
 
 	// -------------------------------------------------------------------------------------------------------
+	// -------------------------------------------------------------------------------------------------------
+	// ORO patch (s) part 6: WET-GROUND PLANAR REFLECTIONS. Render the VESSELS - only the
+	// vessels: no terrain, no sky, no bases - through a camera mirrored about the local
+	// ground plane, into the half-res target. BaseTilePS then samples it at each pixel's
+	// own screen position, masked by the puddle lattice and the Fresnel term, so the
+	// image appears as rippling patches in the standing water rather than as a mirror.
+	//
+	// The mirrored view-projection is THE standard planar trick: pre-multiplying the
+	// reflection matrix means a real point P renders exactly where the main camera sees
+	// its virtual image - so the ground shader lookup is just its own VPOS. A mirror
+	// flips the winding, hence the CULLMODE swap. The pass runs under CUSTOMCAM (the
+	// pass id that already means "the scene, rendered again elsewhere") and costs
+	// nothing when the world is dry.
+	// -------------------------------------------------------------------------------------------------------
+	bWetReflLive = false;
+	{
+		extern float g_gcSurfaceWet;
+		if (g_gcSurfaceWet > 0.01f && psWetRefl && psWetReflDS && Camera.hObj_proxy)
+		{
+			VECTOR3 pC; oapiGetGlobalPos(Camera.hObj_proxy, &pC);
+			VECTOR3 rel = Camera.pos - pC;
+			double  cr  = length(rel);
+			double  lng = 0.0, lat = 0.0, rad = 0.0;
+			oapiGlobalToEqu(Camera.hObj_proxy, Camera.pos, &lng, &lat, &rad);
+			double  elv  = oapiSurfaceElevation(Camera.hObj_proxy, lng, lat);
+			double  hAGL = cr - (oapiGetSize(Camera.hObj_proxy) + elv);
+			// ⚠️ THE PLANE ANCHORS TO THE GROUND UNDER THE FOCUS VESSEL, NOT UNDER THE
+			// CAMERA (round 4: "the reflection changes altitude as I rotate the view").
+			// The elevation sampled under the CAMERA changes as it orbits across
+			// undulating terrain, so a camera-anchored plane made the image rise and
+			// sink while the vessel never moved - paused or not, since it is pure
+			// camera position. The vessel's own ground level is constant under an
+			// orbiting camera, which pins the image; one plane cannot match every
+			// terrain height at once, so it is matched where the eye looks: the ship.
+			// Falls back to the camera anchor when there is no focus vessel nearby or
+			// the camera sits below the vessel's ground plane (a mirror plane above
+			// the camera is nonsense for this use).
+			double planeAGL = hAGL;
+			OBJHANDLE hFoc = oapiGetFocusObject();
+			if (hFoc) {
+				VECTOR3 fpos; oapiGetGlobalPos(hFoc, &fpos);
+				if (length(fpos - Camera.pos) < 2000.0) {
+					double lngF = 0.0, latF = 0.0, radF = 0.0;
+					oapiGlobalToEqu(Camera.hObj_proxy, fpos, &lngF, &latF, &radF);
+					double elvF = oapiSurfaceElevation(Camera.hObj_proxy, lngF, latF);
+					double pa   = cr - (oapiGetSize(Camera.hObj_proxy) + elvF);
+					if (pa > 0.3 && pa < 400.0) planeAGL = pa;
+				}
+			}
+			if (cr > 1.0 && hAGL > 1.0 && hAGL < 250.0)
+			{
+				VECTOR3 up = rel / cr;
+				// plane through the ground point under the FOCUS VESSEL (see above),
+				// in the client's camera-relative world space (camera = origin)
+				D3DXPLANE plane((float)up.x, (float)up.y, (float)up.z, (float)planeAGL);
+				D3DXMATRIX mRefl, mVP1;
+				D3DXMATRIX mSave = Camera.mProjView;
+				D3DXMatrixReflect(&mRefl, &plane);
+				D3DXMatrixMultiply(&mVP1, &mRefl, &mSave);
+				// ⚠️ A SECOND MIRROR, IN CLIP SPACE, AND IT IS THE WHOLE TRICK (round 2).
+				// One reflection makes every triangle wind backwards, and a cull-mode
+				// override cannot fix that here: D3D9Mesh::Render RE-SETS the cull mode
+				// PER GROUP (Mesh.cpp:1924/1927), so any state set before the loop dies
+				// at the first group - the mirrored vessels rendered inside-out and
+				// culled to nothing, which is why round 1 drew an empty target.
+				// Flipping clip-space X is a second mirror: two mirrors = even = the
+				// meshes' own culling is correct untouched. The image lands horizontally
+				// flipped in the RT, and the sampler flips it back (BaseTilePS).
+				D3DXMATRIX mFlipX; D3DXMatrixIdentity(&mFlipX); mFlipX._11 = -1.0f;
+				D3DXMatrixMultiply(&Camera.mProjView, &mVP1, &mFlipX);
+				// ⚠️ AND PUSH IT INTO THE EFFECT (round 3, the actual bug). The meshes do
+				// NOT fetch the view-projection per draw - gVP is set ONCE per camera
+				// update (SetCameraAperture) and every mesh trusts the stored value. So
+				// overriding Camera.mProjView alone mirrored NOTHING: the pass rendered a
+				// plain right-side-up image with the normal camera, and the sampler then
+				// displayed it at x-flipped positions - upright ghost vessels orbiting
+				// the wrong way as the camera turned, which is exactly what he reported.
+				D3D9Effect::SetViewProjMatrix(&Camera.mProjView);
+
+				// the RT must not be bound as a sampler while it is the target
+				if (D3D9Effect::eWetReflTex) D3D9Effect::FX->SetTexture(D3D9Effect::eWetReflTex, NULL);
+
+				BeginPass(RENDERPASS_CUSTOMCAM);
+				gc->PushRenderTarget(psWetRefl, psWetReflDS, RENDERPASS_CUSTOMCAM);
+				RecallDefaultState();
+				HR(pDevice->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0, 1.0f, 0L));
+				for (auto* vVes : RenderList)
+					if (vVes->CamDist() < 1500.0) vVes->Render(pDevice, false);
+				gc->PopRenderTargets();
+				PopPass();
+
+				Camera.mProjView = mSave;
+				D3D9Effect::SetViewProjMatrix(&Camera.mProjView);   // hand the frame back
+				bWetReflLive = true;
+			}
+
+			// one-shot breadcrumbs: the difference between "the pass never ran" and
+			// "it ran and the look is wrong" costs a fly-and-report round otherwise
+			static int logLive = 0, logSkip = 0;
+			if (bWetReflLive && logLive == 0) {
+				oapiWriteLogV("D3D9: ORO wet-mirror pass LIVE (hAGL %.1f m)", hAGL);
+				logLive = 1;
+			}
+			if (!bWetReflLive && logSkip == 0) {
+				oapiWriteLogV("D3D9: ORO wet-mirror pass skipped (hAGL %.1f m, need 1..250)", hAGL);
+				logSkip = 1;
+			}
+		}
+
+		// feed the shaders either way: .w tells BaseTilePS whether the mirror is live
+		extern float g_gcWetRefl;
+		extern float g_gcWetSwimAmp;
+		extern float g_gcWetSwimRate;
+		extern float g_gcWetPoolSize;
+		extern float g_gcWetPoolReach;
+		extern float g_gcWetGrainOp;
+		extern float g_gcWetGrainSize;
+		if (D3D9Effect::eWetReflPrm) {
+			D3DXVECTOR4 wrp(1.0f / (float)viewW, 1.0f / (float)viewH,
+			                g_gcWetRefl, bWetReflLive ? 1.0f : 0.0f);
+			D3D9Effect::FX->SetVector(D3D9Effect::eWetReflPrm, &wrp);
+		}
+		if (D3D9Effect::eWetSwimPrm) {
+			D3DXVECTOR4 wsp(g_gcWetSwimAmp, g_gcWetSwimRate, g_gcWetPoolSize, g_gcWetPoolReach);
+			D3D9Effect::FX->SetVector(D3D9Effect::eWetSwimPrm, &wsp);
+		}
+		if (D3D9Effect::eWetGrainPrm) {
+			D3DXVECTOR4 wgp(g_gcWetGrainOp, g_gcWetGrainSize, 0.0f, 0.0f);
+			D3D9Effect::FX->SetVector(D3D9Effect::eWetGrainPrm, &wgp);
+		}
+		if (bWetReflLive && D3D9Effect::eWetReflTex)
+			D3D9Effect::FX->SetTexture(D3D9Effect::eWetReflTex, ptWetRefl);
+
+		// one-shot: the handles and what the effect ACTUALLY stored after SetVector -
+		// splits "handle never bound" from "value set but not reaching the shader"
+		static int logRb = 0;
+		if (logRb == 0 && bWetReflLive) {
+			D3DXVECTOR4 rb(0, 0, 0, 0);
+			if (D3D9Effect::eWetReflPrm) D3D9Effect::FX->GetVector(D3D9Effect::eWetReflPrm, &rb);
+			oapiWriteLogV("D3D9: ORO wet-mirror handles Prm=%p Tex=%p readback %.5f %.5f %.2f %.1f",
+			              (void*)D3D9Effect::eWetReflPrm, (void*)D3D9Effect::eWetReflTex,
+			              rb.x, rb.y, rb.z, rb.w);
+			logRb = 1;
+		}
+	}
+
 	// Start Main Scene Rendering
 	// -------------------------------------------------------------------------------------------------------
 
@@ -2051,8 +2240,20 @@ void Scene::RenderMainScene()
 		// exterior pass keeps stock shading no matter what the addon asked for.
 		extern float g_gcVCShadowDep;
 		if (D3D9Effect::eVCShdDepth) D3D9Effect::FX->SetFloat(D3D9Effect::eVCShdDepth, g_gcVCShadowDep);
+		// ORO patch (s) extension (2026-08-23): the cockpit INTERIOR is dry - no
+		// drop glint sparkling on the instrument panel, no wet sheen or darkening
+		// on the cabin walls. Both ride gSurfWet (the glint also has its own gain),
+		// so both uniforms are zeroed for the cockpit draw only and restored after:
+		// vessels seen THROUGH the window keep their full wet look. Same bracket,
+		// same reasoning as patch (p) above.
+		extern float g_gcWetGlint;
+		extern float g_gcSurfaceWet;
+		if (D3D9Effect::eWetGlint) D3D9Effect::FX->SetFloat(D3D9Effect::eWetGlint, 0.0f);
+		if (D3D9Effect::eSurfWet)  D3D9Effect::FX->SetFloat(D3D9Effect::eSurfWet, 0.0f);
 		vFocus->Render(pDevice, true);
 		if (D3D9Effect::eVCShdDepth) D3D9Effect::FX->SetFloat(D3D9Effect::eVCShdDepth, 0.0f);
+		if (D3D9Effect::eWetGlint) D3D9Effect::FX->SetFloat(D3D9Effect::eWetGlint, g_gcWetGlint);
+		if (D3D9Effect::eSurfWet)  D3D9Effect::FX->SetFloat(D3D9Effect::eSurfWet, g_gcSurfaceWet);
 	}
 
 	pDevice->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
@@ -3050,6 +3251,19 @@ void Scene::RenderVesselShadows (OBJHANDLE hPlanet, float depth) const
 	// If this planet is not a proxy body skip the rest
 	if (hPlanet != oapiCameraProxyGbody()) return;
 
+	// ORO patch (s) part 2: a sharp projected shadow under a storm deck is the single
+	// loudest "this is actually a sunny day" tell. The shader-side sun collapse fades the
+	// shadow-MAP shadows automatically (they only modulate the sun term), but these
+	// stencil-projected ground shadows are drawn as dark geometry with their own alpha,
+	// so they need fading explicitly. 0 storm = stock exactly.
+	// ⚠️ `depth` IS AN INVERSE ALPHA - RenderGroundShadow draws at (1 - depth) opacity
+	// (VVessel.cpp: `alpha = (1.0f - alpha) * saturate(scale)`). The first version
+	// multiplied depth toward ZERO, which drove the drawn shadow toward FULLY BLACK:
+	// the storm was making non-focus vessels' shadows DARKER while the focus vessel's
+	// map shadow faded correctly - exactly the two-DeltaGlider screenshot. The fade
+	// must push depth toward ONE instead.
+	{ extern float g_gcStormLight; depth = 1.0f - (1.0f - depth) * (1.0f - g_gcStormLight); }
+
 	// render vessel shadows
 	VOBJREC *pv;
 	for (pv = vobjFirst; pv; pv = pv->next) {
@@ -3782,6 +3996,10 @@ void Scene::RenderGlares()
 			if (WorldToScreenSpace2(pos, &pt))
 			{
 				float cis = 1.0f, glare = float(Config->GFXGlare) * saturate(8.0 * AU / sdst);
+				// ORO patch (s) part 2: no sun disc under an overcast, so no glare. Fading
+				// the INTENSITY, not disabling the glare system - GBUF_DEPTH (patch g's
+				// depth buffer) is created by the glare config flags and must survive.
+				{ extern float g_gcStormLight; glare *= (1.0f - g_gcStormLight); }
 				FVECTOR4 clr = FVECTOR4(1, 1, 1, 1);
 
 				vPlanet* vp = GetCameraNearVisual();

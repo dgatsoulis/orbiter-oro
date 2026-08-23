@@ -85,9 +85,9 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
 
 	float3 nrmW = frg.nrmW;
 	float3 tanW = frg.tanW.xyz;
-	float3 cSun = saturate(gSun.Color);
+	float3 cSun = saturate(gSun.Color) * (1.0f - gStorm);   // ORO patch (s) part 2: overcast
 	float3 CamD = normalize(frg.camW);
-	float3 Base = (gMtrl.ambient.rgb*gSun.Ambient) + (gMtrl.emissive.rgb);
+	float3 Base = (gMtrl.ambient.rgb*gSun.Ambient*(1.0f + gStorm * 1.8f)) + (gMtrl.emissive.rgb);
 
 
 	// Compute World space normal -------------------------------------------
@@ -105,6 +105,13 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
 	float  dLN   = saturate(-dot(gSun.Dir, nrmW));
 
 	if (gCfg.Spec) cSpec.a *= 255.0f;
+
+	// ORO patch (s): A WET HULL, legacy path - same sweep as the fast path.
+	if (gSurfWet > 0.001f) {
+		cSpec.rgb = lerp(cSpec.rgb, cSpec.rgb + 0.55f, gSurfWet * 0.8f);
+		cSpec.a   = lerp(cSpec.a, max(cSpec.a, 1.0f) * 7.0f, gSurfWet * 0.75f);
+		cTex.rgb *= lerp(1.0f, 0.66f, gSurfWet);
+	}
 
 	// Approximate roughness
 	float fRghn = log2(cSpec.a) * 0.1f;
@@ -149,6 +156,9 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
 	float3 cAlbedo = cTex.rgb;			// texture colour before lighting
 	cTex.rgb *= saturate(Base + gMtrl.diffuse.rgb * Light_fx(cDiffLocal + cSun * dLN));
 	cTex.rgb += cAlbedo * max(gMtrl.emissive.rgb - 1.0f, 0.0f);
+	// ORO patch (s): the drop glint - SKY light, after the bake (see PBR_PS note)
+	cTex.rgb += WetSparkle(frg.tex0.xy, nrmW, length(frg.camW))
+	          * gSun.Ambient * (1.0f + gStorm * 1.8f) * 6.5f;
 
 	// Lit the specular surface
 	cSpec.rgb *= saturate(cSpecLocal + fSun * cSun);

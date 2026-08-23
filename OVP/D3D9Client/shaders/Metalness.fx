@@ -185,7 +185,15 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 	// ----------------------------------------------------------------------
 
 	float3 camW = normalize(frg.camW);
-	float3 cSun = gSun.Color * lerp(float3(1.1, 1.1, 0.9), float3(1,1,1), saturate(gRadius[3]*2e-5));
+	// ORO patch (s) part 2: overcast collapses the direct sun. ⚠️ SWEPT IN LATE
+	// (2026-08-22), and the story is the diagnostic: a DG on the apron stayed bone dry
+	// and SUNLIT through the storm while its neighbour got the full weather. Two shader-
+	// path theories died (RenderFast, then "the DG has no advanced maps" - a bad grep:
+	// dgmk4_2_ns.dds was in the listing and the pattern missed the _ns suffix), so a
+	// path-tint instrument went in: Glint > 1.9 painted each path a colour, and one
+	// screenshot answered MAGENTA - this file, the only path with no weather code.
+	// Sixth sweep of the "every path or behaviour depends on the path" rule.
+	float3 cSun = gSun.Color * lerp(float3(1.1, 1.1, 0.9), float3(1,1,1), saturate(gRadius[3]*2e-5)) * (1.0f - gStorm);
 
 
 	// ======================================================================
@@ -265,7 +273,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 
 	//cAmbient = saturate(cAmbient * (1.0f + 15.0f * gNightTime));	
 	// Apply base ambient light
-	cAmbient = max(cAmbient, gSun.Ambient);
+	cAmbient = max(cAmbient, gSun.Ambient * (1.0f + gStorm * 1.8f));   // ORO patch (s) part 2
 #endif
 #endif
 
@@ -273,7 +281,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 	// ======================================================================
 	// Compute Earth glow
 	float angl = saturate((-dot(gCameraPos, nrmW) - gProxySize) * gInvProxySize);
-	float3 cAmbient = gAtmColor.rgb * max(0, angl * gGlowConst) + gSun.Ambient;
+	float3 cAmbient = gAtmColor.rgb * max(0, angl * gGlowConst) + gSun.Ambient * (1.0f + gStorm * 1.8f);   // ORO patch (s) part 2
 #endif
 
 
@@ -350,6 +358,9 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 	// Add a faint diffuse hue for rough metals. Rough metal doesn't look good if it's totally black
 	fA += fRgh * fMetal * 0.05f;
 
+	// ORO patch (s): wet albedo damp, same 0.66 as every other path
+	if (gSurfWet > 0.001f) cDiff.rgb *= lerp(1.0f, 0.66f, gSurfWet);
+
 	float3 zD = cDiff.rgb * fA * LightFXSq(Sq(cSun * fR * dLN) + cDiffLocal + Sq(cAmbient * fAmbShd) + Sq(gMtrl.emissive.rgb));
 
 	// Combine specular terms
@@ -357,6 +368,9 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 	float3 zS = cS * (cSun * dLN) + cSpec * LightFX(cSpecLocal) * 0.5f  + cS2 * (cSun * dLN) + cSpec2 * LightFX(cSpecLocal) * 0.5f;		// Modified
 	
 	cDiff.rgb = zD + zS + cE;
+	// ORO patch (s): the drop glint - SKY light, shared helper (see D3D9Client.fx)
+	cDiff.rgb += WetSparkle(frg.tex0.xy, nrmW, length(frg.camW))
+	           * gSun.Ambient * (1.0f + gStorm * 1.8f) * 6.5f;
 
 	// Override material alpha to make reflections visible
 	cDiff.a = saturate(cDiff.a + cmax(zS + cE));

@@ -48,6 +48,12 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
 	if (strcmp(name,"SuppressExhaust")==0) *ppFnc = &gcCore2::SuppressExhaust;
 	if (strcmp(name,"ExemptNewStreams")==0) *ppFnc = &gcCore2::ExemptNewStreams;
 	if (strcmp(name,"SetVCShadows")==0) *ppFnc = &gcCore2::SetVCShadows;
+	if (strcmp(name,"SetSurfaceWetness")==0) *ppFnc = &gcCore2::SetSurfaceWetness;
+	if (strcmp(name,"SetStormLight")==0) *ppFnc = &gcCore2::SetStormLight;
+	if (strcmp(name,"SetWetDarkness")==0) *ppFnc = &gcCore2::SetWetDarkness;
+	if (strcmp(name,"SetWetGlint")==0) *ppFnc = &gcCore2::SetWetGlint;
+	if (strcmp(name,"SetWetReflection")==0) *ppFnc = &gcCore2::SetWetReflection;
+	if (strcmp(name,"SetWetGrain")==0) *ppFnc = &gcCore2::SetWetGrain;
 	if (strcmp(name,"ReleaseSwap")==0) *ppFnc = &gcCore2::ReleaseSwap;
 	if (strcmp(name,"DeleteCustomCamera")==0) *ppFnc = &gcCore2::DeleteCustomCamera;
 	if (strcmp(name,"CustomCameraOnOff")==0) *ppFnc = &gcCore2::CustomCameraOnOff;
@@ -238,6 +244,15 @@ float g_gcVCShadowRad  = 2.2f;   // measured on the stock DeltaGlider, not guess
 // shader comment. Cockpit pass only (Scene.cpp raises and clears it per frame), so
 // exterior shading is untouched at any setting.
 float g_gcVCShadowDep  = 0.0f;
+float g_gcSurfaceWet   = 0.0f;   // ORO patch (s): 0 = dry (stock), 1 = soaked
+float g_gcStormLight   = 0.0f;   // ORO patch (s) part 2: 0 = clear (stock), 1 = full overcast
+float g_gcWetDark      = 1.0f;   // ORO patch (s) part 3: albedo darkening gain, 1 = shipped look
+float g_gcWetGlint     = 1.0f;   // ORO patch (s) part 5: hull drop-glint gain, 1 = designed
+float g_gcWetRefl      = 1.0f;   // ORO patch (s) part 6: puddle reflection gain, 1 = designed
+float g_gcWetSwimAmp   = 1.0f;   // ORO patch (s) part 6: ripple-warp amplitude scale, 1 = designed
+float g_gcWetSwimRate  = 1.0f;   // ORO patch (s) part 6: ripple cadence scale, 1 = designed
+float g_gcWetPoolSize  = 1.0f;   // ORO patch (s) part 7: standing-pool lattice scale, 1 = designed
+float g_gcWetPoolReach = 1.0f;   // ORO patch (s) part 7: pool visibility-distance scale, 1 = designed
 
 void gcCore::SetVCShadows(bool bEnable, float radius, float depth)
 {
@@ -249,6 +264,52 @@ void gcCore::SetVCShadows(bool bEnable, float radius, float depth)
 	// a sum that also holds emissive, so a value outside 0..1 would either brighten the
 	// shadow or drive the term negative.
 	g_gcVCShadowDep = (depth < 0.0f) ? 0.0f : (depth > 1.0f ? 1.0f : depth);
+}
+
+// ORO patch (s). Clamped rather than trusted: the value scales an albedo and drives a
+// Fresnel term, and outside 0..1 it would either brighten the ground or go negative.
+void gcCore::SetSurfaceWetness(float wet)
+{
+	g_gcSurfaceWet = (wet < 0.0f) ? 0.0f : (wet > 1.0f ? 1.0f : wet);
+}
+
+// ORO patch (s) part 2. Clamped: the shaders lerp lighting terms by it, and outside 0..1
+// it would invert the sun or overdrive the ambient.
+void gcCore::SetStormLight(float k)
+{
+	g_gcStormLight = (k < 0.0f) ? 0.0f : (k > 1.0f ? 1.0f : k);
+}
+
+// ORO patch (s) part 3. Defaults to 1 so the shaders behave identically when no addon
+// ever calls this.
+void gcCore::SetWetDarkness(float k)
+{
+	g_gcWetDark = (k < 0.0f) ? 0.0f : (k > 2.0f ? 2.0f : k);
+}
+
+// ORO patch (s) part 5.
+void gcCore::SetWetGlint(float k)
+{
+	g_gcWetGlint = (k < 0.0f) ? 0.0f : (k > 2.0f ? 2.0f : k);
+}
+
+// ORO patch (s) part 6.
+void gcCore::SetWetReflection(float k, float fSwimAmp, float fSwimRate, float fPoolSize, float fPoolReach)
+{
+	g_gcWetRefl      = (k < 0.0f) ? 0.0f : (k > 2.0f ? 2.0f : k);
+	g_gcWetSwimAmp   = (fSwimAmp   < 0.0f) ? 0.0f : (fSwimAmp   > 2.0f ? 2.0f : fSwimAmp);
+	g_gcWetSwimRate  = (fSwimRate  < 0.0f) ? 0.0f : (fSwimRate  > 2.0f ? 2.0f : fSwimRate);
+	g_gcWetPoolSize  = (fPoolSize  < 0.0f) ? 0.0f : (fPoolSize  > 2.0f ? 2.0f : fPoolSize);
+	g_gcWetPoolReach = (fPoolReach < 0.0f) ? 0.0f : (fPoolReach > 2.0f ? 2.0f : fPoolReach);
+}
+
+// ORO patch (s) part 7: the pool grain.
+float g_gcWetGrainOp   = 1.0f;
+float g_gcWetGrainSize = 1.0f;
+void gcCore::SetWetGrain(float fOpacity, float fSize)
+{
+	g_gcWetGrainOp   = (fOpacity < 0.0f) ? 0.0f : (fOpacity > 2.0f ? 2.0f : fOpacity);
+	g_gcWetGrainSize = (fSize    < 0.0f) ? 0.0f : (fSize    > 2.0f ? 2.0f : fSize);
 }
 
 // Queried by vVessel::RenderReentry (declared extern there - no header churn for one bool).

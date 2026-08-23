@@ -536,6 +536,15 @@ private:
 	LPDIRECT3DTEXTURE9 pTextures[TEX_COUNT];
 
 	LPDIRECT3DSURFACE9 pEnvDS, pIrradDS, pDepthNormalDS;
+	LPDIRECT3DTEXTURE9 ptWetRefl;		// ORO patch (s) part 6: wet-ground planar reflection, half res
+	LPDIRECT3DSURFACE9 psWetRefl;		// ORO patch (s) part 6: its level-0 surface (the RT binding)
+	LPDIRECT3DSURFACE9 psWetReflDS;		// ORO patch (s) part 6: its depth-stencil
+	bool bWetReflLive;					// ORO patch (s) part 6: the RT holds this frame's mirror
+public:
+	// ORO patch (s) part 6: the terrain shader samples the same mirror as the base tiles
+	LPDIRECT3DTEXTURE9 GetWetReflTex() const { return bWetReflLive ? ptWetRefl : NULL; }
+	bool IsWetReflLive() const { return bWetReflLive; }
+private:
 	LPDIRECT3DSURFACE9 psShmDS[SHM_LOD_COUNT];
 	LPDIRECT3DSURFACE9 psShmRT[SHM_LOD_COUNT];
 	LPDIRECT3DTEXTURE9 ptShmRT[SHM_LOD_COUNT];

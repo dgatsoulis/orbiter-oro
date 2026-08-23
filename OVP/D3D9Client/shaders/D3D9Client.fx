@@ -154,6 +154,31 @@ uniform extern float     gMix;				// General purpose parameter (multible uses)
 // the COCKPIT PASS ONLY and clears it after, so exterior shading is bit-for-bit stock;
 // 0 is also exactly stock, so the whole patch is inert until an addon asks for it.
 uniform extern float     gVCShdDepth;
+uniform extern float     gSurfWet;        // ORO patch (s): ground wetness, 0..1
+uniform extern float     gWetTime;        // ORO patch (s): real-time sparkle clock, wraps hourly
+uniform extern float     gWetGlint;       // ORO patch (s) part 5: hull glint gain, 0..2
+uniform extern texture   gWetReflTex;     // ORO patch (s) part 6: the wet-ground planar mirror
+uniform extern float4    gWetReflPrm;     // ORO patch (s) part 6: 1/W, 1/H, gain, live
+uniform extern float4    gWetSwimPrm = {1, 1, 1, 1};  // ORO patch (s): swim amp, swim rate, pool size, pool reach (user sliders)
+uniform extern float4    gWetGrainPrm = {1, 1, 0, 0};  // ORO patch (s) part 7: grain opacity, grain size (user sliders)
+sampler WetReflS = sampler_state
+{
+	Texture = <gWetReflTex>;
+	MinFilter = LINEAR;
+	MagFilter = LINEAR;
+	MipFilter = NONE;
+	AddressU = CLAMP;
+	AddressV = CLAMP;
+};
+uniform extern float     gWetDark;        // ORO patch (s) part 3: wet albedo darkening
+                                          // gain, 1 = the designed look (pushed with a 1
+                                          // default from C++, so an absent addon changes
+                                          // nothing).
+uniform extern float     gStorm;          // ORO patch (s) part 2: overcast factor, 0..1.
+                                          // Collapses the directional sun into a lifted
+                                          // ambient in every consumer below - under a
+                                          // storm deck there is no sun disc, so there are
+                                          // no sharp shadows, no warm light, no speculars.
 uniform extern float 	 gMtrlAlpha;
 uniform extern float	 gGlowConst;
 uniform extern float	 gNightTime;		// 1 for nighttime, 0 for daytime
@@ -645,6 +670,36 @@ float4 ExhaustTechPS(SimpleVS frg) : COLOR
 float4 SpotTechPS(SimpleVS frg) : COLOR
 {
 	return (tex2D(SimpleS, frg.tex0) * gColor) * gMix;
+}
+
+// ----------------------------------------------------------------------------
+// ORO patch (s): the rain-drop GLINT, as ONE shared function - because the first build
+// put it inline in PBR_PS alone and a mesh with no advanced textures renders through
+// RenderFast (Mesh.cpp:1453), a third shader path entirely: one vessel sparkled and its
+// neighbour stayed bone dry. The fifth time in this project a rule was written and not
+// swept ((r)'s own rule, "behaviour must not depend on which path a mesh takes"). A
+// shared helper cannot drift between paths.
+// Distance-aware: a drop cell is fixed in mesh UV, so up close one blob covers many
+// pixels and reads as a headlight. Near the camera the blob TIGHTENS and DIMS toward
+// fine speckle; the far look is unchanged.
+float WetSparkle(float2 tex0, float3 nrmW, float dist)
+{
+	if (gSurfWet < 0.001f) return 0.0f;
+	float2 uvS  = tex0 * 34.0f;
+	float2 cell = floor(uvS);
+	float  hc   = frac(sin(dot(cell, float2(127.1f, 311.7f))) * 43758.5453f);
+	float  uu   = gWetTime * (1.0f / 0.55f) + hc;      // the splash-ring cadence
+	float  ep   = floor(uu);
+	float  tt   = frac(uu);
+	float  h2   = frac(sin(dot(cell + ep * 7.13f, float2(269.5f, 183.3f))) * 43758.5453f);
+	float  on   = step(h2, 0.34f);
+	float  env  = on * saturate(tt * 9.0f) * exp(-tt * 5.5f);
+	float2 fp   = frac(uvS) - float2(0.25f + 0.5f * frac(h2 * 13.7f),
+	                                 0.25f + 0.5f * frac(h2 * 41.3f));
+	float  distF = saturate(dist * (1.0f / 45.0f));
+	float  blob  = saturate(1.0f - dot(fp, fp) * lerp(34.0f, 11.0f, distF));
+	float  upF   = saturate(dot(nrmW, normalize(gCameraPos)) * 0.6f + 0.4f);
+	return env * blob * upF * gSurfWet * lerp(0.30f, 1.0f, distF) * gWetGlint;
 }
 
 #include "Particle.fx"

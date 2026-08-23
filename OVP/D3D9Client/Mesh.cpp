@@ -2632,6 +2632,13 @@ void D3D9Mesh::RenderBaseTile(const LPD3DXMATRIX pW)
 
 
 	FX->SetTechnique(eBaseTile);
+	// ORO patch (s): how wet the ground looks. Base tiles are the runway, the aprons and
+	// the taxiways - a different render path from the terrain around them (NewPlanet.hlsl),
+	// which is why the wetness has to be handed to both. 0 is stock.
+	{
+		extern float g_gcSurfaceWet;
+		if (eSurfWet) FX->SetFloat(eSurfWet, g_gcSurfaceWet);
+	}
 	FX->SetVector(eColor, ptr(D3DXVECTOR4(0, 0, 0, 0)));
 	FX->SetMatrix(eGT, gc->GetIdentity());
 	FX->SetMatrix(eW, pW);
@@ -2796,7 +2803,28 @@ void D3D9Mesh::RenderShadowMap(const LPD3DXMATRIX pW, const LPD3DXMATRIX pVP, in
 		// approximation is: a material that is clearly not opaque does not cast. The
 		// threshold is deliberately high - only genuinely translucent materials are
 		// excused, and a 0.95-alpha decal still shadows as before.
-		if (opt != 1 && Grp[g].MtrlIdx != SPEC_DEFAULT && Grp[g].MtrlIdx < nMtrl
+		//
+		// ⚠️ EXTENDED 2026-08-20 TO THE NORMAL/DEPTH PASS (opt == 1), AND THE ORIGINAL
+		// `opt != 1 &&` GUARD WAS A BUG. This function serves two passes, and the skip
+		// was applied to the shadow map only - so the same 0.5-alpha canopy that no
+		// longer casts a solid shadow went on writing FULLY OPAQUE DEPTH into
+		// GBUF_DEPTH. That buffer's whole purpose is "what can this point see" (SSAO,
+		// sun/local-light visibility, and patch (g)'s per-pixel clip for addon
+		// geometry), so a transparent pane recorded at ~1 m from the eye answers "you
+		// can see nothing" for every pixel of the windscreen.
+		//
+		// The symptom that found it: ORO's reentry plasma vanished when the pilot
+		// looked straight ahead out of the DeltaGlider's VC while the exterior view
+		// showed the ship engulfed. Not the plasma failing to draw - the plasma
+		// correctly clipped behind a windscreen the depth buffer believed was a wall.
+		// The aurora and the lightning read the same buffer and were losing the same
+		// pixels.
+		//
+		// The reasoning below applies unchanged to both passes: a material that is
+		// clearly not opaque does not block. If anything it is MORE obviously right
+		// here, because depth is a visibility question and shadowing is only one
+		// consumer of it.
+		if (Grp[g].MtrlIdx != SPEC_DEFAULT && Grp[g].MtrlIdx < nMtrl
 		    && Mtrl[Grp[g].MtrlIdx].Diffuse.w < 0.9f) continue;
 
 		MeshShader::ps_bools.bOIT = (Grp[g].UsrFlag & 0x20) != 0;

@@ -1102,6 +1102,44 @@ void SurfTile::Render ()
 	pShader->SetVSConstants(pShader->PrmVS, sp, sizeof(ShaderParams));
 	pShader->SetPSConstants(pShader->Prm, sp, sizeof(ShaderParams));
 
+	// ORO patch (s): ground wetness. Set BY NAME rather than as a new member of
+	// ShaderParams - that struct is mirrored between C++ and HLSL by layout, and adding a
+	// field to it for one float is a padding bug waiting to happen. 0 is stock.
+	{
+		extern float g_gcSurfaceWet;
+		extern float g_gcStormLight;
+		extern float g_gcWetDark;
+		extern float g_gcWetRefl;
+		float fWet = g_gcSurfaceWet;
+		float fStm = g_gcStormLight;
+		float fWd  = g_gcWetDark;
+		pShader->SetPSConstants("gWet", &fWet, sizeof(float));
+		pShader->SetPSConstants("gStorm", &fStm, sizeof(float));
+		pShader->SetPSConstants("gWetDark", &fWd, sizeof(float));
+
+		// ORO patch (s) part 6: the planar mirror, for the TERRAIN this time. Round 1 put
+		// the reflection in the base-tile shader alone - and the ground a vessel parks on
+		// at KSC is mostly TERRAIN, so the readback said "stored perfectly" while the
+		// pixels never saw it: right value, wrong shader. The seventh path sweep.
+		{
+			extern float g_gcWetSwimAmp;
+			extern float g_gcWetSwimRate;
+			extern float g_gcWetPoolSize;
+			extern float g_gcWetPoolReach;
+			extern float g_gcWetGrainOp;
+			extern float g_gcWetGrainSize;
+			LPDIRECT3DTEXTURE9 pWR = ((Scene*)scene)->GetWetReflTex();
+			float wrp[4] = { 1.0f / (float)scene->ViewW(), 1.0f / (float)scene->ViewH(),
+			                 g_gcWetRefl, pWR ? 1.0f : 0.0f };
+			float wsp[4] = { g_gcWetSwimAmp, g_gcWetSwimRate, g_gcWetPoolSize, g_gcWetPoolReach };
+			float wgp[4] = { g_gcWetGrainOp, g_gcWetGrainSize, 0.0f, 0.0f };
+			pShader->SetPSConstants("gWetReflPrm", wrp, sizeof(wrp));
+			pShader->SetPSConstants("gWetSwimPrm", wsp, sizeof(wsp));
+			pShader->SetPSConstants("gWetGrainPrm", wgp, sizeof(wgp));
+			if (pWR) pShader->SetTexture("tWetRefl", pWR, IPF_CLAMP | IPF_LINEAR);
+		}
+	}
+
 
 	pShader->SetVSConstants(pShader->FlowVS, fcv, sizeof(FlowControlVS));
 	pShader->SetPSConstants(pShader->Flow, fc, sizeof(FlowControlPS));

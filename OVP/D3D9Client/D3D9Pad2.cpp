@@ -991,10 +991,26 @@ void D3D9Triangle::Release()
 //
 void D3D9Triangle::Draw(D3D9Pad* pSkp, LPDIRECT3DDEVICE9 pDev)
 {
+	// ORO patch (l) extension: a TEXTURED poly can tile a world-anchored pattern (the
+	// rain's cloud deck), so its texture must WRAP. The pad's sampler_state is CLAMP,
+	// which is right for the blit paths (no edge bleed on images) and wrong for a
+	// tiling surface. Set at the DEVICE - after the effect pass has applied its own
+	// sampler states, so this wins for exactly this draw - and restored so every
+	// other pad draw keeps its clamp. In-bounds UVs (the lightning atlas) see no
+	// change beyond the outermost half-texel of the whole texture.
+	const bool bWrap = (pTex != NULL);
+	if (bWrap) {
+		pDev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
+		pDev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP);
+	}
 	pDev->SetStreamSource(0, pVB, 0, sizeof(SkpVtx));
 	if (style == PF_TRIANGLES) 	pDev->DrawPrimitive(D3DPT_TRIANGLELIST, 0, nPt / 3);
 	if (style == PF_FAN) pDev->DrawPrimitive(D3DPT_TRIANGLEFAN, 0, nPt - 2);
 	if (style == PF_STRIP) pDev->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, nPt - 2);
+	if (bWrap) {
+		pDev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+		pDev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+	}
 }
 
 

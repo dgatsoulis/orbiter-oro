@@ -108,7 +108,10 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 	// ----------------------------------------------------------------------
 
 	float3 CamD = normalize(frg.camW);
-	float3 cSun = saturate(gSun.Color);
+	// ORO patch (s) part 2: overcast - the directional sun collapses, the ambient lifts
+	// (below, at the diffuse bake). Shadow-map shadows fade automatically with this, since
+	// they only modulate the sun term (the patch-(p) finding, working in our favour here).
+	float3 cSun = saturate(gSun.Color) * (1.0f - gStorm);
 
 
 	// ----------------------------------------------------------------------
@@ -240,6 +243,38 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 	// Compute a specular and diffuse lighting
 	// ----------------------------------------------------------------------
 
+	float wetSprk = 0.0f;   // ORO patch (s): the drop glint, applied AFTER the light bake
+	// ------------------------------------------------------------------------
+	// ORO patch (s): A WET HULL. Same one number that wets the ground - gSurfWet lives in
+	// the shared parameter table and is pushed once per frame, so a vessel standing in the
+	// rain gets wet along with the concrete under it, with no per-vessel plumbing.
+	//
+	// Water on paint does exactly what water on concrete does: the albedo drops as light
+	// stops scattering back out of the surface, and the surface becomes SMOOTH, so the
+	// specular lobe tightens and strengthens. Tightening the lobe is the half that reads
+	// as wet rather than merely dark - a broad dull highlight is a matte finish however
+	// bright you make it.
+	//
+	// ⚠️ NOT dripping or running water. That needs per-mesh UV-space trails with no
+	// authoring support behind them, and it was assessed and dropped long before this.
+	// This is the sheen; the runnels are not coming.
+	//
+	// Exactly zero at gSurfWet 0, so stock content cannot move.
+	if (gSurfWet > 0.001f) {
+		cSpec.rgb = lerp(cSpec.rgb, cSpec.rgb + 0.55f, gSurfWet * 0.8f);
+		cSpec.a   = lerp(cSpec.a, max(cSpec.a, 1.0f) * 7.0f, gSurfWet * 0.75f);
+		cDiff.rgb *= lerp(1.0f, 0.66f, gSurfWet);
+
+		// THE SPARKLE: the shared drop-glint helper (see WetSparkle in D3D9Client.fx -
+		// one implementation for every shader path, distance-aware, splash cadence).
+		// ⚠️ STASHED, NOT WRITTEN INTO cSpec (round 2, and the bug is worth the
+		// comment): the first build added the glint to cSpec.rgb, which the tail routes
+		// through the SUN's specular lobe - the very term the storm light deliberately
+		// collapses. A sparkle hung on the sun cannot exist in the weather that makes
+		// things wet; it is applied after the light bake, scaled by the SKY ambient.
+		wetSprk = WetSparkle(frg.tex0.xy, nrmW, length(frg.camW));
+	}
+
 	// Compute a specular lobe for base material
 	float fLobe = pow(dRS, cSpec.a) * dLNx;
 
@@ -259,7 +294,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 	cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
 
 	// Bake material props and lights together
-	float3 diffBaked = Light_fx(gMtrl.diffuse.rgb * (dLN * cSun + cDiffLocal) + gMtrl.emissive.rgb + gMtrl.ambient.rgb*gSun.Ambient*fAmbShd);
+	float3 diffBaked = Light_fx(gMtrl.diffuse.rgb * (dLN * cSun + cDiffLocal) + gMtrl.emissive.rgb + gMtrl.ambient.rgb*gSun.Ambient*(1.0f + gStorm * 1.8f)*fAmbShd);
 
 #if LMODE > 0
 	cSun = Light_fx(cSun + cSpecLocal);	// Add local light sources
@@ -283,6 +318,10 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 	// STOCK CONTENT CANNOT MOVE: max() is exactly zero for any emissive at or below 1.0,
 	// which is everything an authored mesh carries.
 	cDiff.rgb += cAlbedo * max(gMtrl.emissive.rgb - 1.0f, 0.0f);
+	// ORO patch (s): the drop glint - a pop of SKY light, so it lives in sunshine and
+	// under a storm deck alike, and dies at night with the ambient. Additive on the
+	// final colour: a glint is light arriving at the eye, not a property of the paint.
+	cDiff.rgb += wetSprk * gSun.Ambient * (1.0f + gStorm * 1.8f) * 6.5f;
 	cDiff.a *= gMtrlAlpha;				// Modulate material alpha
 
 
@@ -459,8 +498,17 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
 
 		float3 nrmW  = normalize(frg.nrmW);
 		float4 cSpec = gMtrl.specular.rgba;
-		float3 cSun  = saturate(gSun.Color);
+		float3 cSun  = saturate(gSun.Color) * (1.0f - gStorm);   // ORO patch (s) part 2
 		float  dLN   = saturate(-dot(gSun.Dir, nrmW));
+
+		// ORO patch (s): A WET HULL, fast path. ⚠️ This is the path a mesh with no
+		// advanced textures takes (Mesh.cpp RenderFast) - the first build patched
+		// PBR_PS alone, and one vessel on the apron sparkled while its neighbour
+		// stayed bone dry. (r)'s rule, swept properly this time.
+		if (gSurfWet > 0.001f) {
+			cSpec.rgb = lerp(cSpec.rgb, cSpec.rgb + 0.55f, gSurfWet * 0.8f);
+			cDiff.rgb *= lerp(1.0f, 0.66f, gSurfWet);
+		}
 
 		//cSpec.rgb *= 0.33333f;
 
@@ -490,11 +538,12 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
 		cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
 
 		// ORO patch (p): fShadow is already in hand here (it scaled dLN above).
-		cDiff.rgb *= saturate( (gMtrl.diffuse.rgb*(dLN * cSun + cDiffLocal)) + (gMtrl.ambient.rgb*gSun.Ambient*lerp(1.0f, fShadow, gVCShdDepth)) + gMtrl.emissive.rgb );
+		cDiff.rgb *= saturate( (gMtrl.diffuse.rgb*(dLN * cSun + cDiffLocal)) + (gMtrl.ambient.rgb*gSun.Ambient*(1.0f + gStorm * 1.8f)*lerp(1.0f, fShadow, gVCShdDepth)) + gMtrl.emissive.rgb );
 
 		float3 CamD = normalize(frg.camW);
 		float3 HlfW = normalize(CamD - gSun.Dir);
-		float  fSun = pow(saturate(dot(HlfW, nrmW)), gMtrl.specular.a);
+		// wet water film = smoother surface = tighter lobe (ORO patch s)
+		float  fSun = pow(saturate(dot(HlfW, nrmW)), gMtrl.specular.a * (1.0f + 5.0f * gSurfWet));
 
 #if SHDMAP > 0
 		fSun *= fShadow;
@@ -509,6 +558,9 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
 		float3 specLight = (fSun * cSun);
 #endif
 		cDiff.rgb += (cSpec.rgb * specLight);
+		// ORO patch (s): the drop glint - SKY light, after the bake (see PBR_PS note)
+		cDiff.rgb += WetSparkle(frg.tex0.xy, nrmW, length(frg.camW))
+		           * gSun.Ambient * (1.0f + gStorm * 1.8f) * 6.5f;
 
 		cDiff.rgb += cEmis;
 	}

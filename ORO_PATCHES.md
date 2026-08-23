@@ -28,7 +28,7 @@ git diff 2024..oro-patches
 
 ## What changed
 
-Eighteen patches, lettered (a)–(g) and (i)–(r) to match ORO's own documentation.
+Nineteen patches, lettered (a)–(g) and (i)–(s) to match ORO's own documentation.
 
 **New capability for addons** — things the client could not previously do:
 
@@ -51,6 +51,7 @@ Eighteen patches, lettered (a)–(g) and (i)–(r) to match ORO's own documentat
 | (e) | Reentry particle streams honour (c). The core gives *every* vessel a default reentry stream, and no core API can disable another vessel's streams. |
 | (n) | `SuppressExhaust` — stock exhaust billboards and stream emission, over independent flags. |
 | (o) | `ExemptNewStreams` — a latch so an addon can *replace* stock exhaust streams rather than only add to them. |
+| (s) | **Surface weather** — the largest patch in the set, seven parts: `SetSurfaceWetness` / `SetStormLight` / `SetWetDarkness` / `SetWetGlint` / `SetWetReflection` / `SetWetGrain`, all probe-by-binding, all exactly stock at rest. Wet ground in both ground shaders (terrain *and* base tiles), storm light collapsing the sun at the source, wet hulls in all five vessel paths, a lifecycled drop glint, standing pools pinned to the ground via the LOD-continuous water-microtexture UV, and a planar mirror re-rendering vessels through a ground-reflected camera. Extended 2026-08-23: the cockpit-pass render zeroes the wet uniforms, so a virtual cockpit's interior stays dry while hulls seen through the window keep their full wet look. |
 
 **Stock defects fixed.** These are bugs, not features, and the starred ones are reproducible
 with **no addon loaded at all**:
@@ -86,9 +87,10 @@ upstream Orbiter's own, restricted to the `D3D9Client` target:
    ```
 5. Back up `<Orbiter>\Modules\Plugin\D3D9Client.dll`, then copy the built DLL over it.
 
-**Six shaders are runtime-compiled**, not linked into the DLL: `Sketchpad.fx`,
-`NewPlanet.hlsl`, `D3D9Client.fx`, `Vessel.fx`, `PBR.fx` and `Metalness.fx`. They must be
-copied to `<Orbiter>\Modules\D3D9Client\` as well, or the DLL and its shaders will disagree.
+**Seven shaders are runtime-compiled**, not linked into the DLL: `Sketchpad.fx`,
+`NewPlanet.hlsl`, `D3D9Client.fx`, `Vessel.fx`, `PBR.fx`, `Metalness.fx` and `Mesh.fx`
+(the last joined with patch (s)'s wet base tiles). They must be copied to
+`<Orbiter>\Modules\D3D9Client\` as well, or the DLL and its shaders will disagree.
 Editing them needs no rebuild — just restart Orbiter.
 
 Full per-patch detail, the exact apply order, and the landmines hit along the way are in the

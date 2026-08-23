@@ -143,6 +143,15 @@ public:
 	static D3DXHANDLE	eInvProxySize;
 	static D3DXHANDLE	eMix;          ///< FLOAT Auxiliary factor/multiplier
 	static D3DXHANDLE	eVCShdDepth;   ///< FLOAT ORO patch (p): VC shadow ambient bite, 0..1
+	static D3DXHANDLE	eSurfWet;      ///< FLOAT ORO patch (s): ground wetness, 0..1
+	static D3DXHANDLE	eStorm;        ///< FLOAT ORO patch (s) part 2: overcast factor, 0..1
+	static D3DXHANDLE	eWetDark;      ///< FLOAT ORO patch (s) part 3: wet albedo darkening, 0..2
+	static D3DXHANDLE	eWetTime;      ///< FLOAT ORO patch (s): real-time clock for the rain sparkle
+	static D3DXHANDLE	eWetGlint;     ///< FLOAT ORO patch (s) part 5: hull glint gain, 0..2
+	static D3DXHANDLE	eWetReflTex;   ///< TEXTURE ORO patch (s) part 6: the planar mirror
+	static D3DXHANDLE	eWetReflPrm;   ///< FLOAT4 ORO patch (s) part 6: 1/W, 1/H, gain, live
+	static D3DXHANDLE	eWetSwimPrm;   ///< FLOAT4 ORO patch (s) part 6: swim amp scale, rate scale, 0, 0
+	static D3DXHANDLE	eWetGrainPrm;  ///< FLOAT4 ORO patch (s) part 7: grain opacity, grain size, 0, 0
 	static D3DXHANDLE   eColor;        ///< Auxiliary color input
 	static D3DXHANDLE   eFogColor;     ///< Fog color input
 	static D3DXHANDLE   eTexOff;       ///< Surface tile texture offsets
