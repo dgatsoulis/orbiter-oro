@@ -287,6 +287,10 @@ float4 BaseTilePS(float4 sc : VPOS, TileMeshVS frg) : COLOR
 		float  pud = saturate(p1 * 1.30f - 0.16f + 0.30f * gSurfWet + p3 * 0.35f)
 		           * saturate(p2 * 1.10f + 0.35f + 0.25f * gSurfWet);
 		pud = saturate(pud * 1.6f) * saturate((gSurfWet - 0.70f) / 0.30f);
+		// POOLS OFF AT THE BOTTOM OF THE SLIDER - see the matching note in NewPlanet.hlsl.
+		// Both ground paths, together this time: the runway is a base tile and the apron
+		// is terrain, and patch (s) has now been caught half-wired twice for exactly that.
+		pud *= saturate(gWetSwimPrm.z * 10.0f + 1.0f);
 		pud *= exp(-dstB / (90.0f + 780.0f * gWetSwimPrm.w * gWetSwimPrm.w));
 
 		float wet = gSurfWet;
@@ -350,10 +354,26 @@ float4 BaseTilePS(float4 sc : VPOS, TileMeshVS frg) : COLOR
 			ruv += float2(sin(gWetTime * 12.0f * gWetSwimPrm.y + uvT.y * 4.0f),
 			              cos(gWetTime *  9.7f * gWetSwimPrm.y + uvT.x * 4.0f))
 			     * (0.0005f + 0.0016f * pud) * gWetSwimPrm.x;
-			float  smr = gWetReflPrm.y * 3.2f;                   // shorter smear
+			// REFLECTION BLUR (2026-08-24, gWetGrainPrm.z - see the note in Scene.cpp;
+			// it rides the grain vector only because gWetReflPrm has no spare channel).
+			// Wet ground is not a mirror: it scatters, and the reflection should be
+			// slightly diffuse. The knob stretches the existing vertical smear and, past
+			// zero, opens a lateral pair as well. AT 0 THE THREE TAPS AND THEIR WEIGHTS
+			// ARE EXACTLY AS SHIPPED, so the approved crisp look is bit-identical; the
+			// widening branch is uniform-driven, so every pixel takes the same path and
+			// it costs nothing while the slider is down.
+			float  blur = gWetGrainPrm.z;
+			float  smr = gWetReflPrm.y * 3.2f * (1.0f + 7.0f * blur);   // shorter smear
 			float4 cVes = tex2D(WetReflS, ruv) * 0.5f
 			            + tex2D(WetReflS, ruv + float2(0, smr)) * 0.3f
 			            + tex2D(WetReflS, ruv + float2(0, smr * 2.5f)) * 0.2f;
+			if (blur > 0.001f) {
+				float  hor = gWetReflPrm.x * 9.0f * blur;
+				float4 wide = tex2D(WetReflS, ruv + float2( hor, 0))
+				            + tex2D(WetReflS, ruv + float2(-hor, 0))
+				            + tex2D(WetReflS, ruv + float2(0, -smr * 0.6f));
+				cVes = lerp(cVes, cVes * 0.4f + wide * 0.2f, saturate(blur));
+			}
 			float  rStr = cVes.a * saturate(0.35f + 0.90f * mirror)
 			            * saturate(0.55f * wet + 1.10f * pud) * gWetReflPrm.z;
 			clr = lerp(clr, cVes.rgb, saturate(rStr));

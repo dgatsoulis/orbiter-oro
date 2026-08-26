@@ -806,6 +806,14 @@ float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
 		float  pud = saturate(p1 * 1.30f - 0.16f + 0.30f * gWet + p3 * 0.35f)
 		           * saturate(p2 * 1.10f + 0.35f + 0.25f * gWet);
 		pud = saturate(pud * 1.6f) * saturate((gWet - 0.70f) / 0.30f);
+		// ⚠️ POOLS OFF AT THE BOTTOM OF THE SLIDER (2026-08-25, his spec). Pool size only
+		// ever set the lattice SCALE, and 1/max(0.35, z) floors it - so a slider at zero
+		// still produced a fine mesh of small pools and there was no way to have a merely
+		// WET apron with no standing water. The knob now runs -0.1..2 underneath while
+		// still reading 0..2, and this is where the negative tenth cashes in: 0 at z=-0.1,
+		// full by z=0, so the old bottom-of-range look is exactly the new 0.1 and the
+		// first twentieth of the travel fades the pools in instead of popping them.
+		pud *= saturate(gWetSwimPrm.z * 10.0f + 1.0f);
 		pud *= exp(-dst / (90.0f + 780.0f * gWetSwimPrm.w * gWetSwimPrm.w));
 
 		cTex.rgb *= saturate(lerp(1.0f, 1.0f - 0.494f * gWetDark, gWet));   // recalibrated x2: full track = old 0..1.3
@@ -861,10 +869,23 @@ float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
 			ruv += float2(sin(Const.Time * 10.8f * gWetSwimPrm.y + vUVSrf.x * 43.0f),
 			              cos(Const.Time *  8.5f * gWetSwimPrm.y + vUVSrf.y * 43.0f))
 			     * (0.0007f * gWetSwimPrm.x);
-			float  smr = gWetReflPrm.y * 3.2f;
+			// REFLECTION BLUR (2026-08-24, gWetGrainPrm.z - see the note in Scene.cpp;
+			// it rides the grain vector only because gWetReflPrm has no spare channel).
+			// Wet ground scatters rather than mirroring, so a little diffusion is the
+			// honest look. AT 0 THE TAPS AND WEIGHTS ARE EXACTLY AS SHIPPED; the widening
+			// branch is uniform-driven, so it is free while the slider is down.
+			float  blur = gWetGrainPrm.z;
+			float  smr = gWetReflPrm.y * 3.2f * (1.0f + 7.0f * blur);
 			float4 cVes = tex2D(tWetRefl, ruv) * 0.5f
 			            + tex2D(tWetRefl, ruv + float2(0, smr)) * 0.3f
 			            + tex2D(tWetRefl, ruv + float2(0, smr * 2.5f)) * 0.2f;
+			if (blur > 0.001f) {
+				float  hor = gWetReflPrm.x * 9.0f * blur;
+				float4 wide = tex2D(tWetRefl, ruv + float2( hor, 0))
+				            + tex2D(tWetRefl, ruv + float2(-hor, 0))
+				            + tex2D(tWetRefl, ruv + float2(0, -smr * 0.6f));
+				cVes = lerp(cVes, cVes * 0.4f + wide * 0.2f, saturate(blur));
+			}
 			float  rStr = cVes.a * saturate(0.30f + 2.2f * fresW)
 			            * saturate(0.70f * gWet + 1.25f * pud) * 0.85f * gWetReflPrm.z * gran;
 			cTex.rgb = lerp(cTex.rgb, cVes.rgb, saturate(rStr));

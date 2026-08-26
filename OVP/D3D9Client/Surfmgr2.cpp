@@ -1128,11 +1128,19 @@ void SurfTile::Render ()
 			extern float g_gcWetPoolReach;
 			extern float g_gcWetGrainOp;
 			extern float g_gcWetGrainSize;
+			// ⚠️ .z IS THE REFLECTION BLUR, AND IT MUST BE PUSHED HERE TOO (2026-08-24).
+			// The blur was first wired only into Scene.cpp's D3D9Effect push, which serves
+			// the BASE TILES. The planet shaders are a separate shader object with their
+			// own constant table - this block - so the terrain a vessel actually parks on
+			// never saw the value and the slider did nothing at either end of its range.
+			// THE SAME SWEEP THIS BLOCK'S OWN COMMENT DESCRIBES, four rounds later: any
+			// new wet parameter has to be pushed in BOTH places or it is silently half-wired.
+			extern float g_gcWetBlur;
 			LPDIRECT3DTEXTURE9 pWR = ((Scene*)scene)->GetWetReflTex();
 			float wrp[4] = { 1.0f / (float)scene->ViewW(), 1.0f / (float)scene->ViewH(),
 			                 g_gcWetRefl, pWR ? 1.0f : 0.0f };
 			float wsp[4] = { g_gcWetSwimAmp, g_gcWetSwimRate, g_gcWetPoolSize, g_gcWetPoolReach };
-			float wgp[4] = { g_gcWetGrainOp, g_gcWetGrainSize, 0.0f, 0.0f };
+			float wgp[4] = { g_gcWetGrainOp, g_gcWetGrainSize, g_gcWetBlur, 0.0f };
 			pShader->SetPSConstants("gWetReflPrm", wrp, sizeof(wrp));
 			pShader->SetPSConstants("gWetSwimPrm", wsp, sizeof(wsp));
 			pShader->SetPSConstants("gWetGrainPrm", wgp, sizeof(wgp));

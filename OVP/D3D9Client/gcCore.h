@@ -63,6 +63,7 @@ static class gcCore2 *pCoreInterface = NULL;
 #define RENDERPROC_PLANETARIUM			0x0003	///< Register a HUD callback to draw into a planetarium view using perspective projection
 #define RENDERPROC_EXTERIOR				0x0005  ///< Register a callback to draw into an exterior vessel view using perspective projection
 #define RENDERPROC_PRE_RESOLVE			0x0006  ///< ORO patch (i): fires after the complete scene (terrain, vessels, transparency, VC) but BEFORE the light-blur resolve/tonemap and the HUD. Art drawn here participates in HDR bloom when PostProcess=1 (the render target is still the fp16 offscreen buffer). Ortho pixel coordinates (NULL matrices), same contract as the HUD stages.
+#define RENDERPROC_WET_MIRROR			0x0007  ///< ORO patch (u): fires INSIDE the wet-ground planar reflection pass (patch (s) part 6), after the mirrored meshes/exhausts/beacons/streams and before the render target is popped. The bound target is the half-res reflection texture, NOT the backbuffer - ask the Sketchpad for its size with GetRenderSurfaceSize() rather than assuming the viewport. For its duration GetRenderCam() reports the MIRRORED camera, so an addon that already projects against the render camera needs no second camera path. That camera is a PURE planar mirror and its basis is therefore left-handed: the pass draws its own meshes through an extra clip-space X flip to keep their winding legal, so the RT holds a horizontally mirrored image which the ground shaders undo when sampling. CPU-projected geometry receives no such flip and must mirror its own screen X to match. Scene depth (patch g) belongs to the MAIN camera and must not be used here. Fires only while the ground is wet and the camera is 1..250 m AGL; ortho pixel coordinates (NULL matrices), same contract as the HUD stages.
 ///@}
 
 
@@ -540,8 +541,11 @@ ote A taste knob on the albedo term only - the mirror and the puddle mask ride
 	*   Clamped to 0..2.
 	* \param fPoolReach Pool visibility distance scale, 1 = designed (~900 m e-fold),
 	*   0 = camera vicinity only. Clamped to 0..2.
+	* \param fBlur Diffusion of the reflected image. 0 = the crisp mirror as shipped,
+	*   higher spreads it. Wet ground is not a mirror - it scatters - so a little of
+	*   this is the physically honest look. Clamped to 0..2.
 	*/
-	gc_interface void SetWetReflection(float k, float fSwimAmp, float fSwimRate, float fPoolSize, float fPoolReach);
+	gc_interface void SetWetReflection(float k, float fSwimAmp, float fSwimRate, float fPoolSize, float fPoolReach, float fBlur);
 
 	/**
 	* \brief ORO patch (s) part 7: the pool-grain controls - the broken-water texture

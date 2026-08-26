@@ -497,6 +497,18 @@ bool D3D9Pad::Flush(HPOLY hPoly)
 	HR(FX->SetBool(eDepthClip, bDepthClip));
 	if (bDepthClip) HR(FX->SetTexture(eDepthTex, g_gcSceneDepth));
 
+	// ORO patch (u): WRITE COVERAGE ALPHA TOO (0x200 - the same no-SDK-header bit trick
+	// as patch (d)'s 0x5 and patch (g)'s 0x100). Both blended paths below mask alpha off
+	// with COLORWRITEENABLE 0x7, which is exactly right on the BACKBUFFER: art drawn
+	// there is light on top of a finished frame and must not disturb its alpha.
+	// ⚠️ IT IS EXACTLY WRONG IN AN OFFSCREEN TARGET WHOSE ALPHA IS A MASK. The wet-mirror
+	// RT is cleared to alpha 0 and the ground shaders read `cVes.a` as "is there anything
+	// reflected at this pixel"; geometry that writes only RGB therefore lands in a region
+	// the shader still reads as empty, and survives ONLY where it happens to overlap
+	// something else's alpha - which reads as a broken half-effect rather than a missing
+	// one. Opt-in, so no existing caller changes.
+	const bool bWriteAlpha = ((dwBlendState & 0x200) != 0);
+
 	HR(FX->SetTechnique(eSketch));
 	HR(FX->Begin(&numPasses, D3DXFX_DONOTSAVESTATE));
 
@@ -508,8 +520,14 @@ bool D3D9Pad::Flush(HPOLY hPoly)
 	}
 
 	if (dwBlend == Sketchpad::BlendState::ALPHABLEND) {
-		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
+		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, bWriteAlpha ? 0xF : 0x7);
 		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
+		if (bWriteAlpha) {
+			// Ordinary "over" for coverage: a = src.a + dst.a*(1-src.a).
+			pDev->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, TRUE);
+			pDev->SetRenderState(D3DRS_SRCBLENDALPHA,  D3DBLEND_SRCALPHA);
+			pDev->SetRenderState(D3DRS_DESTBLENDALPHA, D3DBLEND_INVSRCALPHA);
+		}
 	}
 	else if (dwBlend == 0x5) {
 		// ORO patch d (2026-08-01): SKPBS_ADDITIVE - src.rgb * src.a ADDS to the
@@ -519,10 +537,23 @@ bool D3D9Pad::Flush(HPOLY hPoly)
 		// it overrides the pass defaults; the pass re-establishes InvSrcAlpha on the
 		// next BeginPass, and the explicit restore below keeps nothing leaking past
 		// EndPass (the effect runs D3DXFX_DONOTSAVESTATE).
-		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
+		pDev->SetRenderState(D3DRS_COLORWRITEENABLE, bWriteAlpha ? 0xF : 0x7);
 		HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
 		HR(pDev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
 		HR(pDev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_ONE));
+		if (bWriteAlpha) {
+			// ⚠️ SEPARATE factors for alpha, and LINEAR accumulation is the point. Letting
+			// alpha ride the colour factors would give a = src.a*src.a + dst.a - a SQUARED
+			// coverage, which all but deletes the soft outer sheath (alpha ~0.15 -> 0.02)
+			// and leaves only the hot core reflected. ONE/ONE sums coverage the way the
+			// colour sums light. Set plainly, not through HR(): a device without
+			// D3DPMISCCAPS_SEPARATEALPHABLEND simply keeps the colour factors and degrades
+			// to that squared coverage, which is dim but not broken - not worth a hard
+			// failure or a log line every flush.
+			pDev->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, TRUE);
+			pDev->SetRenderState(D3DRS_SRCBLENDALPHA,  D3DBLEND_ONE);
+			pDev->SetRenderState(D3DRS_DESTBLENDALPHA, D3DBLEND_ONE);
+		}
 		bAdditive = true;
 	}
 	else if (dwBlend == Sketchpad::BlendState::COPY) {
@@ -574,6 +605,9 @@ bool D3D9Pad::Flush(HPOLY hPoly)
 
 	HR(pDev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF));
 	HR(pDev->SetRenderState(D3DRS_ALPHABLENDENABLE, bkALPHA));
+	// ORO patch (u): the separate alpha factors are per-flush like the additive ones, and
+	// leaking them would quietly change how every later draw composites alpha.
+	if (bWriteAlpha) pDev->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
 
 	if (bAdditive) {	// ORO patch d: hand back the client-wide default blend factors
 		HR(pDev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));

@@ -294,13 +294,19 @@ void gcCore::SetWetGlint(float k)
 }
 
 // ORO patch (s) part 6.
-void gcCore::SetWetReflection(float k, float fSwimAmp, float fSwimRate, float fPoolSize, float fPoolReach)
+float g_gcWetBlur      = 0.0f;   // ORO patch (s) part 6: reflection diffusion, 0 = crisp
+void gcCore::SetWetReflection(float k, float fSwimAmp, float fSwimRate, float fPoolSize, float fPoolReach, float fBlur)
 {
 	g_gcWetRefl      = (k < 0.0f) ? 0.0f : (k > 2.0f ? 2.0f : k);
 	g_gcWetSwimAmp   = (fSwimAmp   < 0.0f) ? 0.0f : (fSwimAmp   > 2.0f ? 2.0f : fSwimAmp);
 	g_gcWetSwimRate  = (fSwimRate  < 0.0f) ? 0.0f : (fSwimRate  > 2.0f ? 2.0f : fSwimRate);
-	g_gcWetPoolSize  = (fPoolSize  < 0.0f) ? 0.0f : (fPoolSize  > 2.0f ? 2.0f : fPoolSize);
+	// ⚠️ POOL SIZE ALONE MAY GO NEGATIVE, TO -0.1 (2026-08-25). It is the only one of these
+	// that carries an OFF state below its range: the ground shaders fade standing water out
+	// over -0.1..0 so the addon can offer a wet apron with no pools on it, while the user's
+	// slider still reads a plain 0..2. Everything above 0 behaves exactly as before.
+	g_gcWetPoolSize  = (fPoolSize  < -0.1f) ? -0.1f : (fPoolSize  > 2.0f ? 2.0f : fPoolSize);
 	g_gcWetPoolReach = (fPoolReach < 0.0f) ? 0.0f : (fPoolReach > 2.0f ? 2.0f : fPoolReach);
+	g_gcWetBlur      = (fBlur      < 0.0f) ? 0.0f : (fBlur      > 2.0f ? 2.0f : fBlur);
 }
 
 // ORO patch (s) part 7: the pool grain.

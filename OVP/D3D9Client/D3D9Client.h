@@ -1282,6 +1282,24 @@ public:
 	 */
 	bool OutputLoadStatus (const char *msg, int line);
 
+	// ---------------------------------------------------------------------
+	// ORO patch (t): "the chrome goes last"
+	// ---------------------------------------------------------------------
+	// Orbiter's Pane::Render() draws the pilot's instruments (HUD, 2D panel,
+	// glass MFDs) AND the user's chrome (menu bar + info bars) in one
+	// uninterruptible core call, which sits between RENDERPROC_HUD_1ST and
+	// RENDERPROC_HUD_2ND. An addon overlay therefore has no slot between the
+	// two - it must draw under the instruments or over the menu bar - so a
+	// full-frame effect (blur, tilt, a colour wash, rain, plasma) smears
+	// Orbiter's own UI and makes it hard to read and use.
+	//
+	// Arm ChromeDeferBegin() around Render2DOverlay() to capture the chrome
+	// draws instead of executing them, then ChromeDeferFlush() after the addon
+	// stage to replay them on top. Unarmed, nothing changes: every draw goes
+	// straight through as before.
+	void ChromeDeferBegin();
+	void ChromeDeferFlush();
+
 private:
 	void BltError(SURFHANDLE src, SURFHANDLE tgt, const LPRECT s, const LPRECT t, bool bHalt = true) const;
 	void SketchPadTest();
@@ -1354,6 +1372,24 @@ private:
 
 	DWORD loadd_x, loadd_y, loadd_w, loadd_h;
 	int LabelPos;
+
+	// ORO patch (t): deferred menu/info bar ("chrome") draws. See ChromeDeferBegin().
+	// The bars are identified by SURFACE IDENTITY, not by position or draw order:
+	// every one of them - the bar, the warp mini-readout, the action flag and both
+	// auxiliary info bars - is drawn from the single texture "main_menu_tgt.dds",
+	// and MenuInfoBar is its only consumer in the core.
+	struct ChromeDraw {
+		SURFHANDLE *hSurf;	// the core's own array pointer (session lifetime)
+		MESHHANDLE  hMesh;
+		MATRIX3     T;		// BY VALUE: the core mutates its transform between bar draws
+		float       alpha;
+		bool        additive;
+	};
+	static const int MAX_CHROME_DRAWS = 8;
+	ChromeDraw ChromeQ[MAX_CHROME_DRAWS];
+	int        nChromeQ;
+	bool       bDeferChrome;
+	SURFHANDLE hChromeSurf;	// tagged in clbkLoadSurface(), cleared when it is freed
 
 }; // class D3D9Client
 

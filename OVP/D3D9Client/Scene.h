@@ -370,8 +370,19 @@ public:
 	// so anything a module projects there is one full step stale; world-anchored geometry at
 	// close range (the ORO reentry trail) visibly jumps by one frame of camera travel.
 	// Refreshed by UpdateCameraFromOrbiter at the top of every pass that renders the scene.
+	// ORO patch (u): while the wet-mirror render proc runs, GetRenderCam reports the
+	// MIRRORED camera instead of the real one. An addon drawing screen-space geometry
+	// into the reflection needs the camera that pass is rendering with, and it already
+	// asks this function for it - so the whole plumbing is a substitution, not a second
+	// API. See the pass in Scene.cpp for how the two fields are built.
+	bool			bMirrorCam;
+	VECTOR3			mirrorCamPos;
+	MATRIX3			mirrorCamRot;
+
 	void			GetRenderCam(VECTOR3* p, MATRIX3* r, double* t) const {
-						*p = Camera.pos; *r = Camera.grot; *t = tan((double)Camera.aperture); }
+						if (bMirrorCam) { *p = mirrorCamPos; *r = mirrorCamRot; }
+						else            { *p = Camera.pos;   *r = Camera.grot;  }
+						*t = tan((double)Camera.aperture); }
 	VECTOR3			GetCameraGDir() const { return Camera.dir; }
 	OBJHANDLE		GetCameraProxyBody() const { return Camera.hObj_proxy; }
 	vPlanet *		GetCameraProxyVisual() const { return Camera.vProxy; }

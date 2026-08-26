@@ -88,6 +88,9 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
 	psWetRefl = NULL;
 	psWetReflDS = NULL;
 	bWetReflLive = false;
+	bMirrorCam = false;			// ORO patch (u): only true inside the wet-mirror render proc
+	mirrorCamPos = _V(0, 0, 0);
+	mirrorCamRot = identity();
 	pCreateGlare = NULL;
 	viewH = h;
 	viewW = w;
@@ -1584,6 +1587,117 @@ void Scene::RenderMainScene()
 				HR(pDevice->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0, 1.0f, 0L));
 				for (auto* vVes : RenderList)
 					if (vVes->CamDist() < 1500.0) vVes->Render(pDevice, false);
+				// ⚠️ BEACONS TOO, IN A SECOND PASS (2026-08-24, a beta tester's ask:
+				// "if the beacons could be added to the water reflection?"). Nav lights
+				// and strobes were never being lost or clipped here - they are simply
+				// not part of vVessel::Render. The main scene draws them in its own
+				// later loop, and this pass only ever called the mesh half.
+				//
+				// IT NEEDS NO CAMERA PLUMBING, which is the whole reason it is one
+				// loop and not a rework: RenderSpot builds its billboard from the
+				// object's CAMERA-RELATIVE POSITION and draws through the same gVP this
+				// pass already overrides. The blob therefore faces the REAL camera
+				// rather than the mirrored one and is tilted by the angle between the
+				// two view rays - about 11 deg for a camera 3 m up and a vessel 30 m
+				// away, i.e. a round blob at 98% of its width. A soft spot tolerates
+				// that completely, which is what lets a MATRIX-ONLY mirror carry
+				// billboards at all; a custom camera has to swap the whole Camera
+				// struct because it cannot assume the object is near the plane.
+				//
+				// A SECOND LOOP, not folded into the first, matching the main scene:
+				// a beacon has to composite over EVERY hull in the reflection, not
+				// just the one it belongs to. Strobe phase is fmod(simt, period), so
+				// both passes agree within the frame and a reflection can never flash
+				// out of step with the light casting it.
+				// ⚠️ EXHAUST AND PARTICLES TOO (2026-08-25, the same tester's follow-up:
+				// the reflection showed the hull but not what was coming out of it).
+				// Same story as the beacons and the same reason it is this cheap:
+				// vVessel::RenderExhaust orients its billboard from cdir = the camera's
+				// position in VESSEL frame, and D3D9ParticleStream::RenderDiffuse builds
+				// every sprite from (p->pos - camera_gpos) - both CAMERA-RELATIVE
+				// POSITIONS, both drawn through the gVP this pass already overrides. So a
+				// matrix-only mirror carries them, with the same negligible tilt the
+				// beacons have.
+				// ORDER MATCHES THE MAIN SCENE - exhausts, beacons, then streams - because
+				// these are additive layers and the order they accumulate in is the look.
+				// ⚠️ RenderExhaust's FIRST LINE is gcIsExhaustSuppressed(), which is patch
+				// (n). Anyone running ORO's own plume has stock exhaust suppressed, so this
+				// draws nothing for them and costs nothing - it is here for the users who
+				// keep the stock billboards. ORO's own plume cannot arrive by this route at
+				// all: it is screen-space Sketchpad geometry drawn after the scene, so it
+				// would need a render-proc slot INSIDE this pass plus a second geometry
+				// build against the mirrored camera.
+				for (auto* vVes : RenderList)
+					if (vVes->IsActive() && vVes->CamDist() < 1500.0)
+						vVes->RenderExhaust();
+				for (auto* vVes : RenderList)
+					if (vVes->IsActive() && vVes->CamDist() < 1500.0)
+						vVes->RenderBeacons(pDevice);
+				// The streams are scene-owned and carry no cheap distance handle, so they
+				// go in whole, exactly as the main scene and RenderSecondaryScene do. This
+				// only ever runs while the ground is wet and the camera is under 250 m AGL.
+				for (DWORD ns = 0; ns < nstream; ns++) pstream[ns]->Render(pDevice);
+				// ⚠️ AND ORO'S OWN PLUME, WHICH CANNOT ARRIVE BY ANY OF THE ROUTES ABOVE
+				// (2026-08-25, patch (u)). Everything else in this pass is scene geometry
+				// the CLIENT draws, so overriding gVP carried it for free. ORO's jet is
+				// SCREEN-SPACE Sketchpad triangles projected on the CPU and drawn after
+				// the scene, in the pre-resolve slot - by which time this pass is long
+				// finished. So it gets a slot of its own, inside the push.
+				//
+				// TWO THINGS THE SLOT HANDS IT, and both are SUBSTITUTIONS rather than
+				// new API - which is why the addon side is a parameterisation and not a
+				// second renderer:
+				//  - THE PAD IS BOUND TO THE HALF-RES RT, not the backbuffer, because
+				//    BeginDrawing() takes gc->GetTopRenderTarget(). Its ortho matrix and
+				//    its GetRenderSurfaceSize() therefore both describe the reflection
+				//    texture, so an addon reads its viewport out of the Sketchpad it was
+				//    handed and never has to know this target is half resolution. Change
+				//    that resolution and every consumer follows with no addon edit.
+				//  - GetRenderCam() REPORTS THE MIRRORED CAMERA for the duration, so an
+				//    addon that already projects against the render camera (patch k)
+				//    needs no second camera path: one build function, run twice a frame
+				//    against two cameras.
+				//
+				// THE MIRRORED CAMERA IS A REAL CAMERA, and that is what makes the second
+				// point work at all. Reflecting the eye point and the three basis vectors
+				// through the plane gives a view in which a real point P lands exactly
+				// where the main camera sees P's virtual image - the same identity the
+				// matrix trick above relies on. Aperture is untouched: a mirror does not
+				// change the field of view.
+				//
+				// ⚠️ IT IS A PURE MIRROR, SO ITS BASIS IS LEFT-HANDED (det = -1), AND THE
+				// CONSUMER MUST RECONCILE THAT WITH THE RT ITSELF. This pass draws the
+				// meshes through an extra clip-space X flip (mFlipX above) purely to keep
+				// their winding legal, so the RT holds a horizontally mirrored image that
+				// the ground shaders undo when they sample it. CPU-projected geometry gets
+				// no mFlipX, so whatever draws here has to mirror its own screen X to land
+				// in the same convention. Deliberately NOT folded into the reported basis:
+				// the camera then describes the pass's real geometry, and the one place
+				// that has to know about the RT's flip is the code putting pixels in it.
+				//
+				// ⚠️ SCENE DEPTH IS THE MAIN CAMERA'S. ptgBuffer[GBUF_DEPTH] was filled in
+				// RENDERPASS_NORMAL_DEPTH from the real view, so patch (g)'s per-pixel
+				// clip is meaningless in here and would cut the reflection against the
+				// wrong geometry. The doc comment on RENDERPROC_WET_MIRROR says so; there
+				// is nothing this side can do to enforce it.
+				{
+					VECTOR3 mp = Camera.pos - up * (2.0 * planeAGL);
+					MATRIX3 mr = Camera.grot;
+					for (int j = 0; j < 3; j++) {
+						VECTOR3 v = _V(mr.data[j], mr.data[3 + j], mr.data[6 + j]);   // column j
+						v -= up * (2.0 * dotp(up, v));
+						mr.data[j] = v.x; mr.data[3 + j] = v.y; mr.data[6 + j] = v.z;
+					}
+					mirrorCamPos = mp;
+					mirrorCamRot = mr;
+					bMirrorCam = true;
+					D3D9Pad *pSkpM = GetPooledSketchpad(SKETCHPAD_2D_OVERLAY);
+					if (pSkpM) {
+						gc->MakeRenderProcCall(pSkpM, RENDERPROC_WET_MIRROR, NULL, NULL);
+						pSkpM->EndDrawing();
+					}
+					bMirrorCam = false;   // lowered before anything else can ask
+				}
 				gc->PopRenderTargets();
 				PopPass();
 
@@ -1622,8 +1736,14 @@ void Scene::RenderMainScene()
 			D3DXVECTOR4 wsp(g_gcWetSwimAmp, g_gcWetSwimRate, g_gcWetPoolSize, g_gcWetPoolReach);
 			D3D9Effect::FX->SetVector(D3D9Effect::eWetSwimPrm, &wsp);
 		}
+		// ⚠️ .z CARRIES THE REFLECTION BLUR, WHICH IS NOT A GRAIN PARAMETER (2026-08-24).
+		// It rides here purely because gWetReflPrm's four channels are all taken (1/W,
+		// 1/H, gain, live) and this vector already had two spare - a transport, not a
+		// grouping. Anyone hunting the blur will look in gWetReflPrm first; this note is
+		// the signpost. See SetWetReflection's fBlur.
+		extern float g_gcWetBlur;
 		if (D3D9Effect::eWetGrainPrm) {
-			D3DXVECTOR4 wgp(g_gcWetGrainOp, g_gcWetGrainSize, 0.0f, 0.0f);
+			D3DXVECTOR4 wgp(g_gcWetGrainOp, g_gcWetGrainSize, g_gcWetBlur, 0.0f);
 			D3D9Effect::FX->SetVector(D3D9Effect::eWetGrainPrm, &wgp);
 		}
 		if (bWetReflLive && D3D9Effect::eWetReflTex)
@@ -2411,12 +2531,17 @@ void Scene::RenderMainScene()
 		gc->MakeRenderProcCall(pSketch, RENDERPROC_HUD_1ST, NULL, NULL);
 		pSketch->EndDrawing(); // SKETCHPAD_2D_OVERLAY
 	}
+	gc->ChromeDeferBegin();		// ORO patch (t): hold back the menu/info bar draws...
 	gc->Render2DOverlay();
 	pSketch = GetPooledSketchpad(SKETCHPAD_2D_OVERLAY);
 	if (pSketch) {
 		gc->MakeRenderProcCall(pSketch, RENDERPROC_HUD_2ND, NULL, NULL);
 		pSketch->EndDrawing(); // SKETCHPAD_2D_OVERLAY
 	}
+	gc->ChromeDeferFlush();		// ...and put them back ON TOP of the addon overlay, so a
+								// full-frame effect cannot smear Orbiter's own UI.
+								// UNCONDITIONAL, outside the pSketch guard on purpose: a
+								// frame with no pooled sketchpad must still get its bars.
 
 
 	// Enable Freeze mode after the main scene is complete

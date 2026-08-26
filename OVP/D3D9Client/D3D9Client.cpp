@@ -292,7 +292,10 @@ D3D9Client::D3D9Client (HINSTANCE hInstance) :
 	loadd_y       (0),
 	loadd_w       (0),
 	loadd_h       (0),
-	LabelPos      (0)
+	LabelPos      (0),
+	nChromeQ      (0),		// ORO patch (t)
+	bDeferChrome  (false),	// ORO patch (t)
+	hChromeSurf   (NULL)	// ORO patch (t)
 
 {
 }
@@ -1934,6 +1937,24 @@ void D3D9Client::clbkRender2DPanel (SURFHANDLE *hSurf, MESHHANDLE hMesh, MATRIX3
 {
 	_TRACE;
 
+	// ORO patch (t): "the chrome goes last". While armed - i.e. inside the core's
+	// Pane::Render() - capture the menu/info bar draws instead of executing them.
+	// Scene.cpp replays them after the RENDERPROC_HUD_2ND stage, so Orbiter's own
+	// UI ends up on top of any addon overlay instead of underneath it.
+	if (bDeferChrome && hChromeSurf && hSurf && hSurf[0] == hChromeSurf) {
+		if (nChromeQ < MAX_CHROME_DRAWS) {
+			ChromeDraw &q = ChromeQ[nChromeQ++];
+			q.hSurf    = hSurf;		// core storage, alive for the whole frame
+			q.hMesh    = hMesh;
+			q.T        = *T;		// BY VALUE - the core reuses and rewrites this
+			q.alpha    = alpha;		// transform between its own bar draws
+			q.additive = additive;
+			return;
+		}
+		// Queue full (the core issues at most three): draw it now rather than
+		// lose a bar. Ordering against the overlay is the lesser failure.
+	}
+
 	SURFHANDLE surf = NULL;
 	DWORD ngrp = oapiMeshGroupCount(hMesh);
 
@@ -1979,6 +2000,40 @@ void D3D9Client::clbkRender2DPanel (SURFHANDLE *hSurf, MESHHANDLE hMesh, MATRIX3
 {
 	_TRACE;
 	clbkRender2DPanel (hSurf, hMesh, T, 1.0f, additive);
+}
+
+// =======================================================================
+// ORO patch (t): "the chrome goes last"
+//
+// Orbiter's core draws the pilot's instruments (HUD, 2D panel, glass MFDs) and
+// the USER'S CHROME (menu bar + info bars) in one uninterruptible call,
+// Pane::Render(), which sits between RENDERPROC_HUD_1ST and RENDERPROC_HUD_2ND.
+// An addon overlay therefore has no slot between the two: it either draws under
+// the pilot's instruments or over the user's menu bar. So a full-frame effect -
+// a blur, a camera tilt, a colour wash, rain, plasma - smeared Orbiter's own UI
+// along with the world, and the menu bar became hard to read and to use.
+//
+// Nothing here identifies the bars by position or by draw order. Every one of
+// them is drawn from the single texture "main_menu_tgt.dds", tagged in
+// clbkLoadSurface(), and MenuInfoBar is that file's only consumer in the core -
+// so the test is exact, and holds in every cockpit mode, at any opacity, and
+// whatever the scroll or auto-hide state.
+// =======================================================================
+
+void D3D9Client::ChromeDeferBegin()
+{
+	nChromeQ = 0;			// never inherit a queue from a frame that failed to flush
+	bDeferChrome = true;
+}
+
+void D3D9Client::ChromeDeferFlush()
+{
+	bDeferChrome = false;	// FIRST: the replay re-enters clbkRender2DPanel
+	for (int i = 0; i < nChromeQ; i++) {
+		ChromeDraw &q = ChromeQ[i];
+		clbkRender2DPanel(q.hSurf, q.hMesh, &q.T, q.alpha, q.additive);
+	}
+	nChromeQ = 0;
 }
 
 // =======================================================================
@@ -2195,8 +2250,18 @@ SURFHANDLE D3D9Client::clbkLoadSurface (const char *fname, DWORD attrib, bool bP
 		}
 		*/
 	}
-	
-	return NatLoadSurface(fname, attrib, bPath);
+
+	SURFHANDLE hSrf = NatLoadSurface(fname, attrib, bPath);
+
+	// ORO patch (t): tag Orbiter's menu/info bar texture so that its draws can be
+	// held back past the addon overlay stage - see ChromeDeferBegin(). MenuInfoBar
+	// is the ONLY consumer of this file in the core, and every bar it draws (the
+	// bar itself, the warp mini-readout, the action flag and both auxiliary info
+	// bars) draws from this one surface - so it identifies the chrome exactly, in
+	// every cockpit mode and at any opacity, scroll or auto-hide state.
+	if (hSrf && fname && !_stricmp(fname, "main_menu_tgt.dds")) hChromeSurf = hSrf;
+
+	return hSrf;
 }
 
 // ==============================================================
@@ -2305,6 +2370,9 @@ bool D3D9Client::clbkReleaseSurface(SURFHANDLE surf)
 	{
 		if (SurfaceCatalog.count(SURFACE(surf)))
 		{
+			// ORO patch (t): never keep comparing against a freed surface - a later
+			// allocation could land on the same address and be taken for the chrome.
+			if (surf == hChromeSurf) hChromeSurf = NULL;
 			delete SURFACE(surf);
 			return true;
 		}
