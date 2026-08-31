@@ -47,6 +47,7 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
 	if (strcmp(name,"SuppressReentry")==0) *ppFnc = &gcCore2::SuppressReentry;
 	if (strcmp(name,"SuppressExhaust")==0) *ppFnc = &gcCore2::SuppressExhaust;
 	if (strcmp(name,"ExemptNewStreams")==0) *ppFnc = &gcCore2::ExemptNewStreams;
+	if (strcmp(name,"GetExhaustStreamSpec")==0) *ppFnc = &gcCore2::GetExhaustStreamSpec;
 	if (strcmp(name,"SetVCShadows")==0) *ppFnc = &gcCore2::SetVCShadows;
 	if (strcmp(name,"SetSurfaceWetness")==0) *ppFnc = &gcCore2::SetSurfaceWetness;
 	if (strcmp(name,"SetStormLight")==0) *ppFnc = &gcCore2::SetStormLight;
@@ -64,6 +65,7 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
 	if (strcmp(name,"CreateTriangles")==0) *ppFnc = &gcCore2::CreateTriangles;
 	if (strcmp(name,"CreateTrianglesDepth")==0) *ppFnc = &gcCore2::CreateTrianglesDepth;
 	if (strcmp(name,"HasDepthBuffer")==0) *ppFnc = &gcCore2::HasDepthBuffer;
+	if (strcmp(name,"SetIPISceneDepth")==0) *ppFnc = &gcCore2::SetIPISceneDepth;
 	if (strcmp(name,"CreateTrianglesTex")==0) *ppFnc = &gcCore2::CreateTrianglesTex;
 	if (strcmp(name,"UpdateTexture2D")==0) *ppFnc = &gcCore2::UpdateTexture2D;
 	if (strcmp(name,"GetRenderCam")==0) *ppFnc = &gcCore2::GetRenderCam;
@@ -340,6 +342,13 @@ bool gcIsReentrySuppressed(OBJHANDLE hVessel)
 // may not be replacing the streams. GCEXH_BILLBOARD / GCEXH_STREAM (gcCore.h).
 static std::map<OBJHANDLE, DWORD> g_gcExhaustSuppressed;
 
+// (ORO patch (h) part 2 - the authored rain glass - lived here briefly as a
+// gcCore::SetRainGlass per-vessel map. It moved WHOLLY into the client the same day:
+// clbkStoreMeshPersistent is told every preloaded mesh's FILENAME, so the client can
+// read the author's `RAIN 1` tokens itself - see RainGlassStoreScan in Mesh.cpp - and
+// no addon API is needed at all. His requirement: any vessel with the token works,
+// with nothing to configure.)
+
 void gcCore::SuppressExhaust(OBJHANDLE hVessel, DWORD flags)
 {
 	if (!hVessel) return;
@@ -389,6 +398,18 @@ void gcCore::ExemptNewStreams(bool bExempt)
 bool gcExemptLatch()
 {
 	return g_gcExemptLatch;
+}
+
+// ===============================================================================================
+// ORO patch (y): stock stream-spec readback - see gcCore.h.
+//
+int gcCore::GetExhaustStreamSpec(OBJHANDLE hVessel, int idx, PARTICLESTREAMSPEC* out,
+                                 VECTOR3* pos, VECTOR3* dir)
+{
+	if (!hVessel) return 0;
+	Scene *pScene = g_client->GetScene();
+	if (!pScene) return 0;
+	return pScene->GetExhaustStreamSpec(hVessel, idx, out, pos, dir);
 }
 
 // ===============================================================================================
@@ -513,6 +534,27 @@ bool gcCore::HasDepthBuffer()
 {
 	Scene *pScene = g_client->GetScene();
 	return pScene && (pScene->GetDepthTexture() != NULL);
+}
+
+
+// ORO patch (h): bind the live scene depth buffer into an IPI shader's sampler. Patch (g)
+// gave the Sketchpad a per-pixel occlusion test; this gives the same question to a full-frame
+// pixel shader, which is what an effect living ON the windscreen needs - it must know, per
+// pixel, whether it is looking through glass or at the instrument panel.
+//
+// g_gcSceneDepth is patch (g)'s published pointer, so this inherits its lifecycle exactly:
+// set beside the buffer's creation in Scene::Scene and cleared in ~Scene BEFORE the release.
+// Nothing is created, referenced or owned here, and there is nothing to hand back.
+//
+// SetTextureNative (not SetTexture) because the g-buffer is a raw D3D texture and never had
+// a SurfNative wrapper; the client itself binds it the same way for its own visibility pass.
+bool gcCore::SetIPISceneDepth(gcIPInterface *pIP, const char *var, DWORD flags)
+{
+	extern LPDIRECT3DTEXTURE9 g_gcSceneDepth;
+	if (!pIP || !pIP->pIPI || !var) return false;
+	if (!g_gcSceneDepth) return false;			// SunGlare off - caller degrades
+	pIP->pIPI->SetTextureNative(var, g_gcSceneDepth, flags);
+	return true;
 }
 
 

@@ -870,6 +870,9 @@ void D3D9Client::clbkCloseSession(bool fastclose)
 	SAFE_DELETE(scene);
 	LogAlw("============== Deleting Mesh Manager ============");
 	SAFE_DELETE(meshmgr);
+	// ORO patch (h) part 2: the rain-glass store dies with the mesh manager - template
+	// handles recycle across sessions, and a stale entry could match the wrong mesh.
+	{ extern void RainGlassClearStore(); RainGlassClearStore(); }
 	WriteLog("[Session Closed. Scene deleted.]");
 	
 }
@@ -1451,6 +1454,19 @@ void D3D9Client::clbkStoreMeshPersistent(MESHHANDLE hMesh, const char *fname)
 	}
 
 	if (hMesh==NULL) return;
+
+	// ORO patch (h) part 2: this callback is the ONE place the client is told a mesh's
+	// FILENAME, so it is where the author's `RAIN 1` window declarations are read from
+	// the file. See RainGlassStoreScan in Mesh.cpp; instances inherit at construction.
+	// ⚠️ BEFORE StoreMesh, NOT AFTER: StoreMesh is what CONSTRUCTS the stored template
+	// D3D9Mesh, and its constructor is the map lookup - a scan placed below it fills
+	// the store one call too late, and every instance then inherits an empty list.
+	// That exact bug shipped for one fly round on 2026-08-26: the scan logged its
+	// groups, the store was full, and no pane ever rendered.
+	{
+		extern void RainGlassStoreScan(MESHHANDLE hMesh, const char* fname);
+		if (fname) RainGlassStoreScan(hMesh, fname);
+	}
 
 	int idx = meshmgr->StoreMesh(hMesh, fname);
 }

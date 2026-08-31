@@ -127,6 +127,10 @@ public:
 	void RenderGrapplePoints (LPDIRECT3DDEVICE9 dev);
 	void RenderGroundShadow (LPDIRECT3DDEVICE9 dev, OBJHANDLE hPlanet, float depth);
 	void RenderVectors (LPDIRECT3DDEVICE9 dev, D3D9Pad *pSkp);
+	// ORO patch (v) part 2: this vessel's declared reflection plane in camera-centred
+	// world (animation-aware). False when idx is undeclared.
+	bool GetRflPlane(DWORD idx, D3DXVECTOR3* wPos, D3DXVECTOR3* wNrm, float* rDist = NULL);
+	DWORD RflPlaneCount();
 	bool RenderENVMap (LPDIRECT3DDEVICE9 pDev, DWORD cnt=2, DWORD flags=0xFF);
 	bool ProbeIrradiance(LPDIRECT3DDEVICE9 pDev, DWORD cnt = 2, DWORD flags = 0xFF);
 
@@ -209,6 +213,7 @@ private:
 	int nEnv;				// Number of environmental maps
 	int iFace;				// EnvMap Face index that is to be rendered next
 	int eFace;
+	int eCamIdx;		// ORO patch (v): which reflection probe is being rendered
 
 	struct MESHREC {
 		D3D9Mesh *mesh;		// DX9 mesh representation

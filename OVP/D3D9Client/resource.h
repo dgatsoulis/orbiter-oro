@@ -177,6 +177,12 @@
 #define IDC_EARTHVISCFG                         3033
 #define IDC_ESCACHE                             3034
 #define IDC_EAQUALITY                           3035
+#define IDC_PRTLIGHT                            4067	// ⚠️ 3036 collided with IDC_TILECOUNT - the tiles combo's
+														//   values landed in this dropdown; always take max+1 file-wide
+#define IDC_PRTSHADOW                           4068	// ORO: diffuse particle shadow strength slider (same rule)
+#define IDC_PRTLEAD                             4069	// ORO: dawn tint lead slider (same rule)
+#define IDC_PRTSAT                              4070	// ORO: dawn tint depth slider
+#define IDC_PRTBLOOM                            4071	// ORO: dawn tint bloom slider
 #define IDC_TILECOUNT                           3036
 #define IDC_ATM_S1                              4000
 #define IDC_ATM_S2                              4001

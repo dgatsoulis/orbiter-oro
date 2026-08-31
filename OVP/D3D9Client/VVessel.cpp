@@ -56,6 +56,7 @@ vVessel::vVessel(OBJHANDLE _hObj, const Scene *scene): vObject (_hObj, scene)
 	nEnv  = 0;
 	iFace = 0;
 	eFace = 0;
+	eCamIdx = 0;	// ORO patch (v)
 	sunLight = *scene->GetSun();
 	tCheckLight = oapiGetSimTime()-1.0;
 	vClass = 0;
@@ -239,6 +240,31 @@ void vVessel::PreInitObject()
 	if (pMatMgr->LoadConfiguration()) {
 		for (DWORD i=0;i<nmesh;i++) if (meshlist[i].mesh) pMatMgr->ApplyConfiguration(meshlist[i].mesh);
 		pMatMgr->LoadCameraConfig();
+		OroHangTrace("stamp enter %s nmesh=%u", vessel->GetName(), nmesh);
+		// ORO patch (v): stamp each camera's GROUPS ranges onto the mesh instances,
+		// so the group loop in D3D9Mesh::Render can swap probes per group. Ranges
+		// apply to every mesh of the vessel (reflective hulls are single-mesh in
+		// practice; a per-mesh syntax can come later if one ever isn't).
+		for (DWORD c = 1; c < pMatMgr->CameraCount(); c++) {
+			ENVCAMREC* eC = pMatMgr->GetCamera(c);
+			for (WORD r = 0; r < eC->nGrpRng; r++) {
+				const WORD g0 = eC->pGrpRng[r * 2], g1 = eC->pGrpRng[r * 2 + 1];
+				for (DWORD i = 0; i < nmesh; i++) if (meshlist[i].mesh)
+					for (WORD g = g0; g <= g1; g++)
+						meshlist[i].mesh->SetGroupEnvCam(g, BYTE(c));
+			}
+		}
+		// ... and the PLANAR mirror assignments (patch (v) part 2), same shape.
+		for (DWORD p = 0; p < pMatMgr->PlaneCount(); p++) {
+			ENVPLNREC* eP = pMatMgr->GetPlane(p);
+			for (WORD r = 0; r < eP->nGrpRng; r++) {
+				const WORD g0 = eP->pGrpRng[r * 2], g1 = eP->pGrpRng[r * 2 + 1];
+				for (DWORD i = 0; i < nmesh; i++) if (meshlist[i].mesh)
+					for (WORD g = g0; g <= g1; g++)
+						meshlist[i].mesh->SetGroupRflPlane(g, BYTE(p + 1));
+			}
+		}
+		OroHangTrace("stamp exit %s", vessel->GetName());
 	}
 	else LogErr("Failed to load a custom configuration for %s",vessel->GetClassNameA());
 }
@@ -700,13 +726,78 @@ bool vVessel::Render(LPDIRECT3DDEVICE9 dev, bool internalpass)
 	HR(D3D9Effect::FX->SetBool(D3D9Effect::eEnvMapEnable, false));
 	HR(D3D9Effect::FX->SetMatrix(D3D9Effect::eLVP, &shd->mViewProj));
 
+	// ORO patch (v): build THIS vessel's probe table for the meshes' per-group swap -
+	// box centre, axes and probe position taken from vessel-local config space into
+	// the camera-centred world the shaders live in. Refilled on every Render call, so
+	// one vessel's boxes can never leak onto the next (the table is a static).
+	{
+		D3D9Mesh::ENVPRB prb[MAX_ENVCAM];
+		const int np = (Config->EnvMapMode >= 3)	// ORO: probes are exp-mode only
+		             ? min((int)pMatMgr->CameraCount(), (int)MAX_ENVCAM) : 0;
+		for (int c = 0; c < np; c++) {
+			ENVCAMREC* eC = pMatMgr->GetCamera(c);
+			D3DXVECTOR3 w;
+			D3DXVec3TransformCoord(&w, &eC->lPos, &mWorld);
+			prb[c].P = D3DXVECTOR4(w.x, w.y, w.z, 0);
+			if (eC->bBox) {
+				D3DXVec3TransformCoord(&w, &eC->bxC, &mWorld);
+				prb[c].C = D3DXVECTOR4(w.x, w.y, w.z, 1.0f);
+				// vessel axes in world = the world matrix's rows (row-vector convention)
+				prb[c].X = D3DXVECTOR4(mWorld._11, mWorld._12, mWorld._13, eC->bxE.x);
+				prb[c].Y = D3DXVECTOR4(mWorld._21, mWorld._22, mWorld._23, eC->bxE.y);
+				prb[c].Z = D3DXVECTOR4(mWorld._31, mWorld._32, mWorld._33, eC->bxE.z);
+			}
+			else prb[c].C = D3DXVECTOR4(0, 0, 0, 0);
+		}
+		D3D9Mesh::SetEnvProbes(prb, np);
+	}
+	// ORO patch (v) part 2: hand the meshes the mirrored-scene RTs - but ONLY in the
+	// main scene, and only when this vessel's planes were rendered this frame: in
+	// every other pass (env cubes, shadow, depth, the mirror passes themselves) the
+	// table is cleared, which is both the recursion guard and the staleness guard.
+	{
+		LPDIRECT3DTEXTURE9 pt[MAX_ENVPLN]; D3DXVECTOR4 peq[MAX_ENVPLN]; float prd[MAX_ENVPLN]; int npl = 0;
+		if (scn->GetRenderPass() == RENDERPASS_MAINSCENE && Config->EnvMapMode >= 3)
+			npl = scn->GetRflPlaneTex(this, pt, peq, prd, MAX_ENVPLN);
+		D3D9Mesh::SetRflPlanes(npl ? pt : NULL, peq, prd, npl);
+	}
+
 	if (shd->pShadowMap && (scn->GetRenderPass() == RENDERPASS_MAINSCENE)) {
 		HR(D3D9Effect::FX->SetTexture(D3D9Effect::eShadowMap, shd->pShadowMap));
 		HR(D3D9Effect::FX->SetVector(D3D9Effect::eSHD, ptr(D3DXVECTOR4(sr, 1.0f / s, float(oapiRand()), 1.0f / shd->depth))));
 		HR(D3D9Effect::FX->SetBool(D3D9Effect::eShadowToggle, true));
 	}
 	else {
-		HR(D3D9Effect::FX->SetBool(D3D9Effect::eShadowToggle, false));
+		// ORO patch (w) part 2: in SECONDARY passes (probe cubes, both mirrors) bind
+		// last frame's COPY of the sun map for assembly members, so an interior probe
+		// does not render its own closed bay fully sunlit. ComputeShadow runs verbatim.
+		const Scene::SHADOWMAPPARAM* sw = scn->GetSunShdCopy(this);
+		if (sw && sw->pShadowMap && scn->GetRenderPass() != RENDERPASS_SHADOWMAP) {
+			float s2 = float(sw->size);
+			float sr2 = 2.0f * sw->rad / s2;
+			HR(D3D9Effect::FX->SetTexture(D3D9Effect::eShadowMap, sw->pShadowMap));
+			HR(D3D9Effect::FX->SetMatrix(D3D9Effect::eLVP, &sw->mViewProj));
+			HR(D3D9Effect::FX->SetVector(D3D9Effect::eSHD, ptr(D3DXVECTOR4(sr2, 1.0f / s2, float(oapiRand()), 1.0f / sw->depth))));
+			HR(D3D9Effect::FX->SetBool(D3D9Effect::eShadowToggle, true));
+		}
+		else HR(D3D9Effect::FX->SetBool(D3D9Effect::eShadowToggle, false));
+	}
+
+	// ORO patch (w): the planet-shine shadow map - assembly members carry it in EVERY
+	// pass that draws them: the planar/wet mirrors and the probe cubes would otherwise
+	// reflect the UNSHADOWED glow into an otherwise dark bay (a mirror cannot create
+	// light). The world frame is camera-centred and constant within a frame - only
+	// view matrices change per pass - so the lookup is valid everywhere; depth-only
+	// passes ignore the uniforms. Non-members still get the stock glow.
+	{
+		const Scene::SHADOWMAPPARAM* pw = scn->GetPShn(this);
+		if (pw && pw->pShadowMap) {
+			HR(D3D9Effect::FX->SetTexture(D3D9Effect::ePShnMap, pw->pShadowMap));
+			HR(D3D9Effect::FX->SetMatrix(D3D9Effect::ePShnLVP, &pw->mViewProj));
+			// x = enable, y = texel, z = world bias [m], w = 1/depth
+			HR(D3D9Effect::FX->SetVector(D3D9Effect::ePShnSHD, ptr(D3DXVECTOR4(1.0f, 1.0f / float(Config->ShadowMapSize), 0.15f, 1.0f / pw->depth))));
+		}
+		else HR(D3D9Effect::FX->SetVector(D3D9Effect::ePShnSHD, ptr(D3DXVECTOR4(0, 0, 0, 0))));
 	}
 
 	HR(D3D9Effect::FX->SetTexture(D3D9Effect::eIrradMap, pIrrad));
@@ -1136,6 +1227,43 @@ void vVessel::RenderGroundShadow(LPDIRECT3DDEVICE9 dev, OBJHANDLE hPlanet, float
 // Return true if it's time to move to a next vessel
 // false, if more rendereing is required here.
 //
+// ============================================================================================
+// ORO patch (v) part 2: this vessel's reflection plane in CAMERA-CENTRED WORLD space.
+// POS/NRM are authored in the mesh BASE pose; when GRPREF names an animated group the
+// plane rides that group's CURRENT transform, so an opening bay door carries its
+// mirror with it. Returns false when the plane is undeclared or unusable this frame.
+DWORD vVessel::RflPlaneCount()
+{
+	return pMatMgr->PlaneCount();
+}
+
+
+// ============================================================================================
+//
+bool vVessel::GetRflPlane(DWORD idx, D3DXVECTOR3* wPos, D3DXVECTOR3* wNrm, float* rDist)
+{
+	if (idx >= pMatMgr->PlaneCount()) return false;
+	ENVPLNREC* eP = pMatMgr->GetPlane(idx);
+	if (rDist) *rDist = eP->rDist;
+	D3DXVECTOR3 p = eP->lPos, n = eP->lNrm;
+	if (eP->refMesh >= 0 && (DWORD)eP->refMesh < nmesh && meshlist[eP->refMesh].mesh) {
+		const D3D9Mesh::GROUPREC* gr = meshlist[eP->refMesh].mesh->GetGroup((DWORD)eP->refGrp);
+		if (gr && gr->bTransform) {
+			D3DXVECTOR3 p2, n2;
+			D3DXVec3TransformCoord(&p2, &p, &gr->Transform);
+			D3DXVec3TransformNormal(&n2, &n, &gr->Transform);
+			p = p2; n = n2;
+		}
+	}
+	D3DXVec3TransformCoord(wPos, &p, &mWorld);
+	D3DXVec3TransformNormal(wNrm, &n, &mWorld);
+	D3DXVec3Normalize(wNrm, wNrm);
+	return true;
+}
+
+
+// ============================================================================================
+//
 bool vVessel::RenderENVMap(LPDIRECT3DDEVICE9 pDev, DWORD cnt, DWORD flags)
 {
 
@@ -1162,24 +1290,42 @@ bool vVessel::RenderENVMap(LPDIRECT3DDEVICE9 pDev, DWORD cnt, DWORD flags)
 	}
 
 
-	// Create a main EnvMap with mipmap chain for blurred maps --------------------------------------------------------------------
+	// ORO patch (v): the vessel may declare several reflection probes (MAX_ENVCAM).
+	// They render in sequence through the same round-robin that used to serve the one:
+	// six faces of probe eCamIdx across turns, then its blur, then the next probe -
+	// and only after the LAST probe does this vessel yield the turn. Update latency
+	// therefore scales with the probe count, which is the honest price of the feature
+	// and the reason MAX_ENVCAM is small. One camera = the exact stock sequence.
+	// ORO patch (v): multi-probe belongs to the EXPERIMENTAL mode only - under the
+	// three stock settings this runs the exact stock single-camera sequence.
+	OroHangTrace("envmap %s cam=%d face=%d", vessel->GetName(), eCamIdx, eFace);
+	const int nCams = (Config->EnvMapMode >= 3)
+	                ? max(1, min((int)pMatMgr->CameraCount(), (int)MAX_ENVCAM)) : 1;
+	if (eCamIdx >= nCams) eCamIdx = 0;   // config shrank between sessions
+
+	// Create this probe's EnvMap with mipmap chain for blurred maps ----------------------------------------
 	//
-	if (pEnv[ENVMAP_MAIN] == NULL) {
+	if (pEnv[eCamIdx] == NULL) {
 		D3DSURFACE_DESC desc;
 		pEnvDS->GetDesc(&desc);
-		if (D3DXCreateCubeTexture(pDev, desc.Width, 5, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &pEnv[ENVMAP_MAIN]) != S_OK) {
+		if (D3DXCreateCubeTexture(pDev, desc.Width, 5, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &pEnv[eCamIdx]) != S_OK) {
 			LogErr("Failed to create env cubemap for visual %s", _PTR(this));
 			return true;
 		}
-		nEnv++;
+		if (eCamIdx + 1 > nEnv) nEnv = eCamIdx + 1;
+		// ORO patch (v) breadcrumb: proves the round-robin actually reached this probe.
+		if (eCamIdx > 0)
+			oapiWriteLogV("D3D9: env probe %d cube created (%s).", eCamIdx, vessel->GetName());
 	}
 
 	// Create blurred maps  -------------------------------------------------------------------------------
 	//
 	if (eFace >= 6) {
 		eFace = 0;
-		scn->RenderBlurredMap(pDev, pEnv[ENVMAP_MAIN]);
-		return true;
+		scn->RenderBlurredMap(pDev, pEnv[eCamIdx]);
+		eCamIdx++;
+		if (eCamIdx >= nCams) { eCamIdx = 0; return true; }   // full probe cycle done
+		return false;                                          // next probe, next turn
 	}
 
 	double tot_env = D3D9GetTime();
@@ -1189,12 +1335,12 @@ bool vVessel::RenderENVMap(LPDIRECT3DDEVICE9 pDev, DWORD cnt, DWORD flags)
 	// Render EnvMaps ---------------------------------------------------------------------------------------
 	//
 
-	std::set<vVessel *> RndList = scn->GetVessels(10e3, true);	
+	std::set<vVessel *> RndList = scn->GetVessels(10e3, true);
 	std::set<vVessel *> AddLightSrc;
 
 	AddLightSrc.insert(this);
 
-	ENVCAMREC *eCam = pMatMgr->GetCamera(0);
+	ENVCAMREC *eCam = pMatMgr->GetCamera(eCamIdx);
 
 	if ((eCam->flags&ENVCAM_FOCUS) == 0) RndList.erase(this);
 
@@ -1250,7 +1396,7 @@ bool vVessel::RenderENVMap(LPDIRECT3DDEVICE9 pDev, DWORD cnt, DWORD flags)
 
 	for (DWORD i=0;i<cnt;i++) {
 
-		HR(pEnv[ENVMAP_MAIN]->GetCubeMapSurface(D3DCUBEMAP_FACES(eFace), 0, &pSrf));
+		HR(pEnv[eCamIdx]->GetCubeMapSurface(D3DCUBEMAP_FACES(eFace), 0, &pSrf));   // ORO patch (v)
 	
 		gc->AlterRenderTarget(pSrf, pEnvDS);
 

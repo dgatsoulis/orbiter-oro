@@ -87,6 +87,16 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
 	ptWetRefl = NULL;
 	psWetRefl = NULL;
 	psWetReflDS = NULL;
+	ptRflPln[0] = ptRflPln[1] = NULL;	// ORO patch (v) part 2
+	ptPShn = NULL; psPShn = NULL;		// ORO patch (w)
+	ptSunCpy = NULL; psSunCpy = NULL; sunCpyLive = false;
+	memset(&sunCpy, 0, sizeof(sunCpy));
+	memset(&pshn, 0, sizeof(pshn));
+	psRflPln[0] = psRflPln[1] = NULL;
+	pRflPlnVes = NULL;
+	nRflPlnLive = 0;
+	rflPlnEq[0] = rflPlnEq[1] = D3DXVECTOR4(0, 0, 0, 0);
+	rflPlnDist[0] = rflPlnDist[1] = 5.0f;
 	bWetReflLive = false;
 	bMirrorCam = false;			// ORO patch (u): only true inside the wet-mirror render proc
 	mirrorCamPos = _V(0, 0, 0);
@@ -200,6 +210,14 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
 	HR(pDevice->CreateTexture(viewW / 2, viewH / 2, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &ptWetRefl, NULL));
 	if (ptWetRefl) HR(ptWetRefl->GetSurfaceLevel(0, &psWetRefl));
 	HR(pDevice->CreateDepthStencilSurface(viewW / 2, viewH / 2, D3DFMT_D24X8, D3DMULTISAMPLE_NONE, 0, true, &psWetReflDS, NULL));
+	// ORO patch (v) part 2: the VESSEL planar-mirror targets - same size, same format,
+	// same reasoning; the pass that fills them is gated on a vessel DECLARING planes,
+	// so nobody pays a frame cost without asking for one. They share the wet mirror's
+	// depth-stencil: the passes run strictly one after another and each clears it.
+	for (int i = 0; i < 2; i++) {
+		HR(pDevice->CreateTexture(viewW / 2, viewH / 2, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &ptRflPln[i], NULL));
+		if (ptRflPln[i]) HR(ptRflPln[i]->GetSurfaceLevel(0, &psRflPln[i]));
+	}
 
 
 	// ------------------------------------------------------------------------------
@@ -377,6 +395,7 @@ Scene::~Scene ()
 	SAFE_RELEASE(psWetRefl);
 	SAFE_RELEASE(ptWetRefl);
 	SAFE_RELEASE(psWetReflDS);
+	for (int i = 0; i < 2; i++) { SAFE_RELEASE(psRflPln[i]); SAFE_RELEASE(ptRflPln[i]); }	// ORO patch (v) part 2
 	SAFE_RELEASE(pLocalResults);
 	SAFE_RELEASE(pLocalResultsSL);
 	SAFE_RELEASE(pSunTex);
@@ -385,6 +404,11 @@ Scene::~Scene ()
 	SAFE_RELEASE(pSunGlareAtm);
 
 	for (int i = 0; i < ARRAYSIZE(psShmDS); i++) SAFE_RELEASE(psShmDS[i]);
+	SAFE_RELEASE(psPShn);	// ORO patch (w)
+	SAFE_RELEASE(ptPShn);
+	SAFE_RELEASE(psSunCpy);
+	SAFE_RELEASE(ptSunCpy);
+	sunCpyLive = false;
 	for (int i = 0; i < ARRAYSIZE(ptShmRT); i++) SAFE_RELEASE(ptShmRT[i]);
 	for (int i = 0; i < ARRAYSIZE(psShmRT); i++) SAFE_RELEASE(psShmRT[i]);
 	for (int i = 0; i < ARRAYSIZE(pBlrTemp); i++) SAFE_RELEASE(pBlrTemp[i]);
@@ -1263,6 +1287,8 @@ void Scene::RecallDefaultState()
 
 // ===========================================================================================
 //
+static void OroGatherAssembly(Scene* scn, vVessel* vRoot, std::list<vVessel*>& out);	// ORO patch (w), defined below
+
 void Scene::RenderMainScene()
 {
 	_TRACE;
@@ -1389,12 +1415,77 @@ void Scene::RenderMainScene()
 	// Render Environmental Map For the Vessels
 	// -------------------------------------------------------------------------------------------------------
 
+	// -------------------------------------------------------------------------------------------------------
+	// ORO patch (w): PLANET-SHINE SHADOWS. Stock adds Earth glow to every planet-facing
+	// surface with NO occlusion term of any kind, so a closed payload bay glows sky-blue
+	// (reported on the stock client; the sun term gets ComputeShadow, the glow term gets
+	// nothing). In "Full Scene ORO (exp)" only: render the focus vessel's attachment
+	// assembly into a depth map along the PLANET direction - RenderShadowMap reused
+	// wholesale - then copy the result out and RESTORE the sun's struct; the sun's own
+	// pass (much later) repaints the borrowed LOD target. The glow sites in PBR.fx /
+	// Metalness.fx attenuate by this map for assembly members. The pass sits HERE -
+	// before the env-cube turn and both mirror passes - so every reflection of the
+	// assembly consumes THIS frame's map: a mirror must not create light, and a
+	// mirrored bay lit by unshadowed glow inside a dark real bay did exactly that.
+	//
+	pshnSet.clear();
+	if (Config->EnvMapMode >= 3 && Config->ShadowMapMode >= 1 && psShmRT[0] && vFocus && vFocus->IsActive() && Camera.hObj_proxy)
+	{
+		std::list<vVessel*> assy;
+		OroGatherAssembly(this, vFocus, assy);
+		if (!assy.empty())
+		{
+			// merged bounding sphere of the assembly
+			D3DXVECTOR3 c = assy.front()->GetBoundingSpherePosDX();
+			float r = assy.front()->GetBoundingSphereRadius();
+			for (auto* vv : assy) {
+				D3DXVECTOR3 d = vv->GetBoundingSpherePosDX() - c;
+				float dist = D3DXVec3Length(&d);
+				float rr = vv->GetBoundingSphereRadius();
+				if (dist + rr > r) {
+					float nr = (r + dist + rr) * 0.5f;
+					if (dist > 1e-4f) c += d * ((nr - r) / dist);
+					r = nr;
+				}
+			}
+			// light direction: the way planet shine travels, planet centre -> assembly
+			VECTOR3 gp; oapiGetGlobalPos(Camera.hObj_proxy, &gp);
+			VECTOR3 gcam = GetCameraGPos();
+			D3DXVECTOR3 pp(float(gp.x - gcam.x), float(gp.y - gcam.y), float(gp.z - gcam.z));
+			D3DXVECTOR3 ld = c - pp;
+			D3DXVec3Normalize(&ld, &ld);
+
+			SmapRenderList.clear();
+			for (auto* vv : assy) SmapRenderList.push_back(vv);
+
+			SHADOWMAPPARAM save = smap;
+			int lod = RenderShadowMap(c, ld, r, false, true);
+			if (lod >= 0 && EnsurePShnTarget())
+			{
+				HR(pDevice->StretchRect(psShmRT[lod], NULL, psPShn, NULL, D3DTEXF_POINT));
+				pshn = smap;
+				pshn.pShadowMap = ptPShn;
+				for (auto* vv : assy) pshnSet.insert(vv);
+				// logs on every CHANGE of the assembly size - the first frame runs before
+				// all visuals exist (they are created over successive frames), so a one-shot
+				// would report the transient and never the steady state
+				static int logPShnN = -1;
+				if ((int)pshnSet.size() != logPShnN) {
+					logPShnN = (int)pshnSet.size();
+					oapiWriteLogV("D3D9: planet-shine shadows LIVE (%d vessel(s) in assembly)", logPShnN);
+				}
+			}
+			smap = save;
+		}
+	}
+
+
 	if (dwTurn == RENDERTURN_ENVCAM) {
 
 		if (Config->EnvMapMode) {
 			DWORD flags = 0;
 			if (Config->EnvMapMode == 1) flags |= 0x01;
-			if (Config->EnvMapMode == 2) flags |= (0x03 | 0x20);
+			if (Config->EnvMapMode >= 2) flags |= (0x03 | 0x20);	// ORO patch (v): mode 3 = full scene + exp
 
 			if (vobjEnv == NULL) vobjEnv = vobjFirst;
 
@@ -1421,7 +1512,7 @@ void Scene::RenderMainScene()
 		if (Config->EnvMapMode && Config->bIrradiance) {
 			DWORD flags = 0;
 			if (Config->EnvMapMode == 1) flags |= 0x01;
-			if (Config->EnvMapMode == 2) flags |= (0x03 | 0x20);
+			if (Config->EnvMapMode >= 2) flags |= (0x03 | 0x20);	// ORO patch (v): mode 3 = full scene + exp
 
 			if (vobjIrd == NULL) vobjIrd = vobjFirst;
 
@@ -1759,6 +1850,84 @@ void Scene::RenderMainScene()
 			              (void*)D3D9Effect::eWetReflPrm, (void*)D3D9Effect::eWetReflTex,
 			              rb.x, rb.y, rb.z, rb.w);
 			logRb = 1;
+		}
+	}
+
+	// -------------------------------------------------------------------------------------------------------
+	// ORO patch (v) part 2: VESSEL PLANAR MIRRORS - the EXACT reflection for the flat
+	// near-mirror surfaces that expose probe parallax (the shuttle's radiators and
+	// door inner faces). For each plane the FOCUS vessel declares (_ecam BEGIN_PLANE),
+	// render the vessel list - SELF INCLUDED, which is the whole point - through a
+	// camera mirrored about the plane, into a half-res target; PBR groups assigned to
+	// the plane sample it at their own screen position, the wet-ground mirror's exact
+	// contract. Distant environment stays with the probes (probe parallax error
+	// vanishes at infinity), so the two techniques cover each other's blind spots.
+	// The CLIP PLANE removes geometry BEHIND the mirror - the vessel's own far half -
+	// which a ground-plane mirror never had to worry about; with shaders active D3D9
+	// clip planes live in CLIP SPACE (inverse-transpose of the VP).
+	// -------------------------------------------------------------------------------------------------------
+	OroHangTrace("mainscene reached planar gate");
+	nRflPlnLive = 0; pRflPlnVes = NULL;
+	if (Config->EnvMapMode >= 3 && vFocus && vFocus->IsActive() && vFocus->CamDist() < 1500.0 && psWetReflDS)
+	{
+		const DWORD npl = min(vFocus->RflPlaneCount(), (DWORD)2);
+		for (DWORD ip = 0; ip < npl; ip++)
+		{
+			if (!psRflPln[ip]) continue;
+			OroHangTrace("planar plane %u begin", ip);
+			D3DXVECTOR3 pw, nw; float rd = 5.0f;
+			if (!vFocus->GetRflPlane(ip, &pw, &nw, &rd)) continue;
+			// the camera (this space's ORIGIN) must sit on the reflective side, with
+			// half a metre of margin so a grazing eye cannot z-fight the plane
+			const float d0 = -D3DXVec3Dot(&nw, &pw);
+			if (d0 < 0.5f) continue;
+
+			D3DXPLANE plane(nw.x, nw.y, nw.z, d0);
+			// the same equation feeds the shader's curvature warp (gPlnEq)
+			rflPlnEq[ip] = D3DXVECTOR4(nw.x, nw.y, nw.z, d0);
+			rflPlnDist[ip] = rd;
+			D3DXMATRIX mRefl, mVP1, mFlipX;
+			D3DXMATRIX mSave = Camera.mProjView;
+			D3DXMatrixReflect(&mRefl, &plane);
+			D3DXMatrixMultiply(&mVP1, &mRefl, &mSave);
+			// the wet mirror's double-flip: a second mirror in clip space keeps every
+			// group's own culling legal; the sampler undoes the X flip (PBR.fx)
+			D3DXMatrixIdentity(&mFlipX); mFlipX._11 = -1.0f;
+			D3DXMatrixMultiply(&Camera.mProjView, &mVP1, &mFlipX);
+			D3D9Effect::SetViewProjMatrix(&Camera.mProjView);
+
+			D3DXMATRIX mI; D3DXMatrixInverse(&mI, NULL, &Camera.mProjView);
+			D3DXMatrixTranspose(&mI, &mI);
+			D3DXPLANE cp; D3DXPlaneTransform(&cp, &plane, &mI);
+
+			// the RT must not be bound as a sampler while it is the target
+			if (D3D9Effect::ePlnMap) D3D9Effect::FX->SetTexture(D3D9Effect::ePlnMap, NULL);
+
+			BeginPass(RENDERPASS_CUSTOMCAM);
+			gc->PushRenderTarget(psRflPln[ip], psWetReflDS, RENDERPASS_CUSTOMCAM);
+			RecallDefaultState();
+			HR(pDevice->SetClipPlane(0, (const float*)&cp));
+			HR(pDevice->SetRenderState(D3DRS_CLIPPLANEENABLE, 1));
+			HR(pDevice->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0, 1.0f, 0L));
+			for (auto* vVes : RenderList)
+				if (vVes->CamDist() < 1500.0) vVes->Render(pDevice, false);
+			HR(pDevice->SetRenderState(D3DRS_CLIPPLANEENABLE, 0));
+			gc->PopRenderTargets();
+			PopPass();
+
+			Camera.mProjView = mSave;
+			D3D9Effect::SetViewProjMatrix(&Camera.mProjView);
+
+			OroHangTrace("planar plane %u done", ip);
+			nRflPlnLive |= (1 << ip);
+		}
+		if (nRflPlnLive) pRflPlnVes = vFocus;
+
+		static int logPln = 0;
+		if (nRflPlnLive && logPln == 0) {
+			oapiWriteLogV("D3D9: planar mirror pass LIVE (%d of %d plane(s), mask 0x%X)",
+				(nRflPlnLive & 1) + ((nRflPlnLive >> 1) & 1), (int)npl, nRflPlnLive);
+			logPln = 1;
 		}
 	}
 
@@ -2121,6 +2290,15 @@ void Scene::RenderMainScene()
 		if (shadow_lod >= 0) {
 
 			pShdMap = ptShmRT[shadow_lod];
+
+			// ORO patch (w) part 2: copy the FOCUS sun map for next frame's secondary
+			// passes (probe cubes, mirrors) - see Scene.h. Exp mode only.
+			if (Config->EnvMapMode >= 3 && EnsureSunCpyTarget()) {
+				HR(pDevice->StretchRect(psShmRT[shadow_lod], NULL, psSunCpy, NULL, D3DTEXF_POINT));
+				sunCpy = smap;
+				sunCpy.pShadowMap = ptSunCpy;
+				sunCpyLive = true;
+			}
 
 			auto it = RenderList.begin();
 
@@ -2883,6 +3061,69 @@ D3DXCOLOR Scene::GetSunDiffColor()
 
 // ===========================================================================================
 //
+// ===========================================================================================
+// ORO patch (w): the focus vessel's ATTACHMENT ASSEMBLY - climb to the root of the
+// attachment tree, then collect every visual below it. Berthed payloads ride their
+// carrier's planet-shine shadow map this way, and focusing the payload instead of
+// the carrier changes nothing about the lighting (as it must not).
+//
+static void OroGatherAssembly(Scene* scn, vVessel* vRoot, std::list<vVessel*>& out)
+{
+	VESSEL* v = vRoot->GetInterface();
+	if (!v) return;
+	for (int guard = 0; guard < 8; guard++) {
+		VESSEL* parent = NULL;
+		DWORD n = v->AttachmentCount(true);
+		for (DWORD i = 0; i < n; i++) {
+			OBJHANDLE hP = v->GetAttachmentStatus(v->GetAttachmentHandle(true, i));
+			if (hP) { parent = oapiGetVesselInterface(hP); break; }
+		}
+		if (!parent) break;
+		v = parent;
+	}
+	std::list<VESSEL*> open; open.push_back(v);
+	std::set<VESSEL*> seen; seen.insert(v);
+	while (!open.empty()) {
+		VESSEL* cur = open.front(); open.pop_front();
+		vObject* vo = scn->GetVisObject(cur->GetHandle());
+		if (vo && vo->IsActive()) out.push_back((vVessel*)vo);
+		DWORD n = cur->AttachmentCount(false);
+		for (DWORD i = 0; i < n && seen.size() < 16; i++) {
+			OBJHANDLE hC = cur->GetAttachmentStatus(cur->GetAttachmentHandle(false, i));
+			if (!hC) continue;
+			VESSEL* c = oapiGetVesselInterface(hC);
+			if (c && !seen.count(c)) { seen.insert(c); open.push_back(c); }
+		}
+	}
+}
+
+// ===========================================================================================
+// ORO patch (w): the planet-shine map's own target (full ShadowMapSize, R32F like
+// the sun LODs). Lazy - never allocated under the three stock reflection modes.
+//
+bool Scene::EnsurePShnTarget()
+{
+	if (ptPShn) return true;
+	int size = Config->ShadowMapSize;
+	if (pDevice->CreateTexture(size, size, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT, &ptPShn, NULL) != S_OK) { ptPShn = NULL; return false; }
+	if (ptPShn->GetSurfaceLevel(0, &psPShn) != S_OK) { SAFE_RELEASE(ptPShn); psPShn = NULL; return false; }
+	return true;
+}
+
+// ===========================================================================================
+// ORO patch (w) part 2: the sun-map copy target - same recipe.
+//
+bool Scene::EnsureSunCpyTarget()
+{
+	if (ptSunCpy) return true;
+	int size = Config->ShadowMapSize;
+	if (pDevice->CreateTexture(size, size, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT, &ptSunCpy, NULL) != S_OK) { ptSunCpy = NULL; return false; }
+	if (ptSunCpy->GetSurfaceLevel(0, &psSunCpy) != S_OK) { SAFE_RELEASE(ptSunCpy); psSunCpy = NULL; return false; }
+	return true;
+}
+
+// ===========================================================================================
+//
 int Scene::RenderShadowMap(D3DXVECTOR3 &pos, D3DXVECTOR3 &ld, float rad, bool bInternal, bool bListExists)
 {
 	rad *= 1.02f;
@@ -3519,6 +3760,23 @@ void Scene::DeleteVessel(OBJHANDLE hVessel)
 
 // ===========================================================================================
 //
+// ORO patch (y): walk the scene's particle streams and report the reconstructed
+// spec of hVessel's STOCK exhaust streams - the only place a vessel author's own
+// PARTICLESTREAMSPEC can be read back from (the core copies it at construction and
+// exposes no getter). Read-only; nothing is lent, so 23(k)'s load-window rule does
+// not apply.
+int Scene::GetExhaustStreamSpec (OBJHANDLE hVessel, int idx, PARTICLESTREAMSPEC* out,
+                                 VECTOR3* pos, VECTOR3* dir)
+{
+	int n = 0;
+	for (DWORD i = 0; i < nstream; i++) {
+		if (!pstream[i]->OroIsStockExhaust(hVessel)) continue;
+		if (n == idx) pstream[i]->OroGetSpec(out, pos, dir);
+		n++;
+	}
+	return n;
+}
+
 void Scene::AddParticleStream (class D3D9ParticleStream *_pstream)
 {
 

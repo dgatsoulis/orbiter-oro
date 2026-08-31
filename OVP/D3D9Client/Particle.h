@@ -80,6 +80,17 @@ public:
 
 	ParticleSpec * GetPlast() const { return plast; }
 
+	// ORO patch (y): stream-spec readback for gcCore::GetExhaustStreamSpec. The core
+	// COPIES a PARTICLESTREAMSPEC at construction and exposes no getter, so the client
+	// is the only place a vessel's stock stream definition can be read back from. The
+	// base class answers "not a stock exhaust"; ExhaustStream overrides with its
+	// vessel identity + the patch-(o) latch (an ORO replacement stream is not stock).
+	virtual bool OroIsStockExhaust(OBJHANDLE hV) const { return false; }
+	// outPos/outDir (optional): the stream's attach point and THRUST direction, both
+	// VESSEL-frame - they are pointers into the vessel's own thruster storage, which
+	// is what lets a consumer classify a stream by engine group.
+	void OroGetSpec(PARTICLESTREAMSPEC* out, VECTOR3* outPos, VECTOR3* outDir) const;
+
 protected:
 
 	void SetSpecs (PARTICLESTREAMSPEC *pss);
@@ -137,6 +148,10 @@ public:
 		PARTICLESTREAMSPEC *pss = 0);
 	void RenderGroundShadow (LPDIRECT3DDEVICE9 dev, LPDIRECT3DTEXTURE9 &prevtex);
 	void Update ();
+
+	// ORO patch (y): stock = belongs to this vessel AND not created under the
+	// patch-(o) exemption latch.
+	bool OroIsStockExhaust(OBJHANDLE hV) const { return hRef == hV && !bExempt; }
 
 private:
 	OBJHANDLE hPlanet;

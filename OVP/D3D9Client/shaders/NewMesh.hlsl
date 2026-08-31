@@ -21,6 +21,10 @@ uniform extern struct PSConst {
 
 uniform extern struct PSBools {
 	BOOL bOIT;		// Enable order independent transparency
+	BOOL bRainGlass;	// ORO patch (h) part 2: authored window glass (mesh FLAG 0x1000) -
+						// NormalDepth_PS writes camera distance NEGATED so effect shaders
+						// can tell "window" from "interior"; every other GBUF_DEPTH.a
+						// consumer guards with d > 0.1 and reads a negative as "nothing".
 } ps_bools;
 
 
@@ -165,6 +169,9 @@ float4 NormalDepth_PS(NormalTexVS frg) : COLOR
 	//if (dot(frg.nrmW, ps_const.Cam_Z) > 0) clip(-1);
 
 	float D = length(frg.posW);
+	// ORO patch (h) part 2: authored window glass writes its distance NEGATED - the
+	// sign IS the per-pixel "this is a window" mask. See Mesh.cpp's group loop.
+	if (ps_bools.bRainGlass) D = -D;
 	float x = dot(frg.nrmW, ps_const.Cam_X);
 	float y = dot(frg.nrmW, ps_const.Cam_Y);
 	float z = sqrt(saturate(1.0 - (x * x + y * y)));

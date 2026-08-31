@@ -262,7 +262,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 
 		// ======================================================================
 		// Sample Env Map
-		SampleEnvMap(cEnv, dCN, fRgh, fMetal, rflW, nrmW);
+		SampleEnvMap(cEnv, dCN, fRgh, fMetal, EnvDir(-frg.camW, rflW), nrmW);   // ORO patch (v)
 	}
 
 #if defined(_IRRADIANCE)
@@ -281,7 +281,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 	// ======================================================================
 	// Compute Earth glow
 	float angl = saturate((-dot(gCameraPos, nrmW) - gProxySize) * gInvProxySize);
-	float3 cAmbient = gAtmColor.rgb * max(0, angl * gGlowConst) + gSun.Ambient * (1.0f + gStorm * 1.8f);   // ORO patch (s) part 2
+	float3 cAmbient = gAtmColor.rgb * (max(0, angl * gGlowConst) * PShineShadow(-frg.camW)) + gSun.Ambient * (1.0f + gStorm * 1.8f);   // ORO patch (s) part 2 + (w)
 #endif
 
 

@@ -13,14 +13,23 @@ struct ParticleVS
 {
 	float4 posH     : POSITION0;
 	float2 tex0     : TEXCOORD0;
-	float  light    : TEXCOORD1;
+	float3 light    : TEXCOORD1;	// ORO patch (x): RGB (was a scalar) - the sun share carries a hue
 };
 
 ParticleVS ParticleDiffuseVS(NTVERTEX vrt)
 {
 	ParticleVS outVS = (ParticleVS)0;
 	outVS.tex0    = vrt.tex0;
-	outVS.light   = 1.0f; // saturate(dot(-gSun.Dir, vrt.nrmL) * 2.0f);
+	// ORO patch (x): per-particle lighting, computed on the CPU and carried in the
+	// normal channel's x component (D3D9ParticleStream::RenderDiffuse). Stock
+	// hardcoded 1.0 here with the original N.L term commented out - normal-based
+	// lighting misbehaves on camera-facing billboards, so the replacement is
+	// POSITION-based: sun visibility at the particle (night side, terminator,
+	// twilight, altitude-depressed horizon) + the user's ambient floor + the engine
+	// flame lighting nearby smoke, with the sun share tinted by the client's own
+	// atmospheric sun colour (sunset reddening). A fully sunlit particle carries
+	// exactly (1,1,1), so the daytime look is bit-identical to stock.
+	outVS.light   = vrt.nrmL.xyz; // stock: 1.0f; // saturate(dot(-gSun.Dir, vrt.nrmL) * 2.0f);
 	outVS.posH    = mul(float4(vrt.posL, 1.0f), gVP);
 	return outVS;
 }

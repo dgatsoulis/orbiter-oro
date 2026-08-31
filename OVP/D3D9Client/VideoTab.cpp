@@ -615,6 +615,7 @@ void VideoTab::InitSetupDialog(HWND hWnd)
 	SendDlgItemMessageA(hWnd, IDC_ENVMODE, CB_ADDSTRING, 0, (LPARAM)"Disable (Debug)");
 	SendDlgItemMessageA(hWnd, IDC_ENVMODE, CB_ADDSTRING, 0, (LPARAM)"Planet Only");
 	SendDlgItemMessageA(hWnd, IDC_ENVMODE, CB_ADDSTRING, 0, (LPARAM)"Full Scene");
+	SendDlgItemMessageA(hWnd, IDC_ENVMODE, CB_ADDSTRING, 0, (LPARAM)"Full Scene ORO (exp)");	// ORO patch (v): index 3
 	SendDlgItemMessage(hWnd, IDC_ENVMODE, CB_SETCURSEL, 0, 0);
 
 	// CUSTOM CAMERA MODE --------------------------------------
@@ -657,6 +658,26 @@ void VideoTab::InitSetupDialog(HWND hWnd)
 	SendDlgItemMessageA(hWnd, IDC_MICROMODE, CB_ADDSTRING, 0, (LPARAM)"Disabled");
 	SendDlgItemMessageA(hWnd, IDC_MICROMODE, CB_ADDSTRING, 0, (LPARAM)"Enabled");
 	SendDlgItemMessage(hWnd,  IDC_MICROMODE, CB_SETCURSEL, 0, 0);
+
+	// ORO patch (x): DIFFUSE particle sun lighting mode ------------
+	SendDlgItemMessage(hWnd,  IDC_PRTLIGHT, CB_RESETCONTENT, 0, 0);
+	SendDlgItemMessageA(hWnd, IDC_PRTLIGHT, CB_ADDSTRING, 0, (LPARAM)"Off (stock, always lit)");
+	SendDlgItemMessageA(hWnd, IDC_PRTLIGHT, CB_ADDSTRING, 0, (LPARAM)"Brightness only");
+	SendDlgItemMessageA(hWnd, IDC_PRTLIGHT, CB_ADDSTRING, 0, (LPARAM)"Brightness + colour");
+	// ... and the diffuse-particle ground-shadow strength (his ask, 2026-08-30: a
+	// low sun stretched a smoke column's shadow into a near-black band). 0..100 on
+	// the trackbar = 0..1 in the config; 100 = stock strength.
+	SendDlgItemMessage(hWnd, IDC_PRTSHADOW, TBM_SETRANGEMAX, 1, 100);
+	SendDlgItemMessage(hWnd, IDC_PRTSHADOW, TBM_SETRANGEMIN, 1, 0);
+	// ... and the three dawn-tint dials (his ask, 2026-08-30: tune without a
+	// recompile). All 0..100 on the trackbar; the mappings live at the
+	// SETPOS/GETPOS sites: lead 0..0.20 sin-el, depth 1..4, bloom 1..3.
+	SendDlgItemMessage(hWnd, IDC_PRTLEAD,  TBM_SETRANGEMAX, 1, 100);
+	SendDlgItemMessage(hWnd, IDC_PRTLEAD,  TBM_SETRANGEMIN, 1, 0);
+	SendDlgItemMessage(hWnd, IDC_PRTSAT,   TBM_SETRANGEMAX, 1, 100);
+	SendDlgItemMessage(hWnd, IDC_PRTSAT,   TBM_SETRANGEMIN, 1, 0);
+	SendDlgItemMessage(hWnd, IDC_PRTBLOOM, TBM_SETRANGEMAX, 1, 100);
+	SendDlgItemMessage(hWnd, IDC_PRTBLOOM, TBM_SETRANGEMIN, 1, 0);
 
 
 	// MICROTEX BLEND MODE -----------------------------------------
@@ -806,6 +827,11 @@ void VideoTab::InitSetupDialog(HWND hWnd)
 	SendDlgItemMessage(hWnd, IDC_SELFSHADOWS, CB_SETCURSEL, Config->ShadowMapMode, 0);
 	SendDlgItemMessage(hWnd, IDC_SHADOWFILTER, CB_SETCURSEL, Config->ShadowFilter, 0);
 	SendDlgItemMessage(hWnd, IDC_TERRAIN, CB_SETCURSEL, Config->TerrainShadowing, 0);
+	SendDlgItemMessage(hWnd, IDC_PRTLIGHT, CB_SETCURSEL, Config->ParticleLight, 0);	// ORO patch (x)
+	SendDlgItemMessage(hWnd, IDC_PRTSHADOW, TBM_SETPOS, 1, (LPARAM)(Config->ParticleShadow * 100.0 + 0.5));	// ORO patch (x)
+	SendDlgItemMessage(hWnd, IDC_PRTLEAD,  TBM_SETPOS, 1, (LPARAM)(Config->ParticleTintLead * 500.0 + 0.5));			// ORO patch (x): 0..0.20 -> 0..100
+	SendDlgItemMessage(hWnd, IDC_PRTSAT,   TBM_SETPOS, 1, (LPARAM)((Config->ParticleTintSat  - 1.0) / 0.03 + 0.5));		// ORO patch (x): 1..4 -> 0..100
+	SendDlgItemMessage(hWnd, IDC_PRTBLOOM, TBM_SETPOS, 1, (LPARAM)((Config->ParticleTintBloom - 1.0) / 0.02 + 0.5));	// ORO patch (x): 1..3 -> 0..100
 	SendDlgItemMessage(hWnd, IDC_GUIMODE, CB_SETCURSEL, Config->gcGUIMode, 0);
 
 	SendDlgItemMessage(hWnd, IDC_DEMAND, BM_SETCHECK, Config->PlanetPreloadMode==0, 0);
@@ -896,6 +922,11 @@ void VideoTab::SaveSetupState(HWND hWnd)
 	Config->bAbsAnims	  = (int)SendDlgItemMessage (hWnd, IDC_ABSANIM, BM_GETCHECK, 0, 0);
 	Config->bCloudNormals = (int)SendDlgItemMessage(hWnd, IDC_CLOUDNORM, BM_GETCHECK, 0, 0);
 	Config->bFlats		  = (int)SendDlgItemMessage(hWnd, IDC_FLATS, BM_GETCHECK, 0, 0);
+	Config->ParticleLight = max(0, (int)SendDlgItemMessage(hWnd, IDC_PRTLIGHT, CB_GETCURSEL, 0, 0));	// ORO patch (x)
+	Config->ParticleShadow = max(0.0, min(1.0, (double)SendDlgItemMessage(hWnd, IDC_PRTSHADOW, TBM_GETPOS, 0, 0) / 100.0));	// ORO patch (x)
+	Config->ParticleTintLead  = max(0.0, min(0.2, (double)SendDlgItemMessage(hWnd, IDC_PRTLEAD,  TBM_GETPOS, 0, 0) / 500.0));		// ORO patch (x)
+	Config->ParticleTintSat   = max(1.0, min(4.0, 1.0 + (double)SendDlgItemMessage(hWnd, IDC_PRTSAT,   TBM_GETPOS, 0, 0) * 0.03));	// ORO patch (x)
+	Config->ParticleTintBloom = max(1.0, min(3.0, 1.0 + (double)SendDlgItemMessage(hWnd, IDC_PRTBLOOM, TBM_GETPOS, 0, 0) * 0.02));	// ORO patch (x)
 	Config->DebugBreak	  = (int)SendDlgItemMessage(hWnd, IDC_BREAK, BM_GETCHECK, 0, 0);
 	Config->bGlares		  = (int)SendDlgItemMessage(hWnd, IDC_ESUNGLARE, BM_GETCHECK, 0, 0);
 	Config->bLocalGlares  = (int)SendDlgItemMessage(hWnd, IDC_ELIGHTSGLARE, BM_GETCHECK, 0, 0);

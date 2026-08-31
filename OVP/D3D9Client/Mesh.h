@@ -87,6 +87,12 @@ public:
 
 	static struct PSBools {
 		BOOL bOIT;		// Enable order independent transparency
+		BOOL bRainGlass;	// ORO patch (h) part 2: this group is AUTHORED WINDOW GLASS
+							// (mesh FLAG 0x1000) - the normal/depth pass writes its
+							// camera distance NEGATED, so a full-frame shader can tell
+							// "window" from "interior" per pixel. Every existing
+							// consumer of GBUF_DEPTH.a guards with `d > 0.1`, so a
+							// negative value reads as "nothing drawn" to all of them.
 	} ps_bools;
 
 
@@ -185,6 +191,12 @@ public:
 		bool  bDualSided;
 		bool  bDeleted;			// This entry is deleted by DelGroup()
 		bool  bRendered;
+		BYTE  RflPlane;			// ORO patch (v) part 2: 0 = none, 1..2 = planar mirror
+								// index + 1 - groups drawing the EXACT mirrored-scene RT
+		BYTE  EnvCam;			// ORO patch (v): which reflection probe this group
+								// samples (0 = the classic single probe). Set from the
+								// GC config's camera GROUPS ranges; zero-init in every
+								// ctor path (memset or memcpy-from-memset origin).
 		D3DXMATRIX  Transform;	// Group specific transformation matrix
 		D9BBox BBox;
 		DWORD TexIdxEx[MAXTEX];
@@ -231,6 +243,30 @@ public:
 	const GROUPREC * GetGroup(DWORD idx) const;
 	void            SetMFDScreenId(DWORD idx, WORD id);
 	void			SetDualSided(DWORD idx, bool bState) { Grp[idx].bDualSided = bState; }
+	// ORO patch (v): assign a group to a reflection probe (see GROUPREC::EnvCam)
+	void			SetGroupEnvCam(DWORD idx, BYTE cam) { if (idx < nGrp) Grp[idx].EnvCam = cam; }
+	void			SetGroupRflPlane(DWORD idx, BYTE p) { if (idx < nGrp) Grp[idx].RflPlane = p; }
+
+	// ORO patch (v): the per-probe BOX-PROJECTION parameters for the vessel whose
+	// meshes are about to render - camera-centred world space, filled by
+	// vVessel::Render each call (the MeshShader::ps_bools static pattern; the render
+	// is single-threaded, so per-vessel refill is race-free by construction). C.w = 0
+	// means the probe has no box and samples by raw direction.
+	struct ENVPRB { D3DXVECTOR4 C, X, Y, Z, P; };
+	static ENVPRB	sEnvPrb[4];
+	static int		sEnvPrbN;
+	static void		SetEnvProbes(const ENVPRB* p, int n);
+
+	// ORO patch (v) part 2: the PLANAR mirror targets for the vessel being rendered -
+	// filled by vVessel::Render beside the probe table, cleared (n = 0) for every
+	// vessel without planes and on every non-main pass, so a mirrored RT can never be
+	// sampled while it is being written or leak onto another hull.
+	static LPDIRECT3DTEXTURE9 sPlnTex[2];
+	static D3DXVECTOR4 sPlnEq[2];	// plane equation (N, d), camera-centred world
+	static float	sPlnDist[2];	// RDIST - assumed reflected-geometry distance [m]
+	static int		sPlnN;
+	static void		SetRflPlanes(LPDIRECT3DTEXTURE9* t, const D3DXVECTOR4* eq, const float* dist, int n);
+
 
 	/**
 	 * \brief Returns number of material specifications.
@@ -332,6 +368,13 @@ public:
 
 private:
 
+	// ORO patch (h) part 2: this mesh's rain-glass GROUP indices - the groups the
+	// author marked `RAIN 1` in the mesh file. Filled at construction: the template
+	// ctor looks the TEMPLATE HANDLE up in the store that clbkStoreMeshPersistent's
+	// scan filled (Mesh.cpp, RainGlassStoreScan), and the instance-from-template ctor
+	// inherits the stored mesh's copy. Empty for every mesh with no RAIN tokens, and
+	// for meshes never preloaded (oapiLoadMesh copies have no filename to scan).
+	std::vector<WORD> rainGrp;
 
 	void			UpdateTangentSpace(NMVERTEX *pVrt, WORD *pIdx, DWORD nVtx, DWORD nFace, bool bTextured);
 	void			ProcessInherit();

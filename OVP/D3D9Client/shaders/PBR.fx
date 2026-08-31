@@ -188,6 +188,44 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 	// ----------------------------------------------------------------------
 
 	float3 RflW = reflect(-CamD, nrmW);				// Reflection vector
+	// ORO patch (v): the direction the ENV MAP is sampled with - box-projected when
+	// this group's probe carries a proxy box, RflW verbatim otherwise. Lighting dot
+	// products below stay on the true RflW; only the cube lookup is re-aimed.
+	float3 RflE = EnvDir(-frg.camW, RflW);
+	// ORO patch (v) part 2: this group's PLANAR mirror, if it has one. Sampled once
+	// here; where its alpha says something was reflected, it REPLACES the cube colour
+	// at both env sites below - the exact image wins over the approximation, and the
+	// probe keeps the pixels the mirrored pass left empty (planet, sky).
+	float4 cPln = float4(0, 0, 0, 0);
+	if (gPlnCtl.z > 0.5f) {
+		// ORO patch (v) 2b: CURVATURE-AWARE planar sampling. Follow the pixel's TRUE
+		// reflected ray (curved normal, normal map and all) an assumed distance RDIST
+		// (gPlnCtl.w), mirror that point through the declared plane (gPlnEq) and
+		// project it with the scene camera. Law of reflection: for a flat on-plane
+		// pixel the mirrored point lies on the straight continuation of the eye ray,
+		// so this reduces EXACTLY to sampling the pixel's own screen position,
+		// independent of RDIST - the warp exists only where the normal deviates from
+		// the plane, and the distance error there is second-order.
+		// RDIST 0 is a SENTINEL: the flat mirror verbatim - the exact pre-warp
+		// sampling, kept so a config can A/B flat against warped per plane.
+		if (gPlnCtl.w > 0.01f) {
+			float3 Q  = RflW * gPlnCtl.w - frg.camW;         // P + R*t  (P = -camW)
+			float3 Qm = Q - (2.0f * (dot(gPlnEq.xyz, Q) + gPlnEq.w)) * gPlnEq.xyz;
+			float4 ch = mul(float4(Qm, 1.0f), gVP);
+			if (ch.w > 0.1f) {
+				float2 puv;
+				puv.x = 1.0f - (ch.x * (0.5f / ch.w) + 0.5f);  // + the pass's X flip
+				puv.y = 0.5f - ch.y * (0.5f / ch.w);           // ndc y-up -> v-down
+				// a ray warped off the RT falls back to the probe (CLAMP would smear)
+				if (all(saturate(puv) == puv)) cPln = tex2D(PlnMapS, puv);
+			}
+		}
+		else {
+			float2 puv = sc.xy * gPlnCtl.xy;
+			puv.x = 1.0f - puv.x;               // undo the pass's clip-space X flip
+			cPln = tex2D(PlnMapS, puv);
+		}
+	}
 	float dRS = saturate(-dot(RflW, gSun.Dir));		// Reflection/sun angle
 	float dLN = saturate(-dot(gSun.Dir, nrmW));		// Diffuse lighting term
 	float dLNx = saturate(dLN * 80.0f);				// Specular, Fresnel shadowing term
@@ -291,7 +329,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 	// ----------------------------------------------------------------------
 
 	float angl = saturate((-dot(gCameraPos, nrmW) - gProxySize) * gInvProxySize);
-	cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
+	cDiffLocal += gAtmColor.rgb * (max(0, angl*gGlowConst) * PShineShadow(-frg.camW));	// ORO patch (w)
 
 	// Bake material props and lights together
 	float3 diffBaked = Light_fx(gMtrl.diffuse.rgb * (dLN * cSun + cDiffLocal) + gMtrl.emissive.rgb + gMtrl.ambient.rgb*gSun.Ambient*(1.0f + gStorm * 1.8f)*fAmbShd);
@@ -363,7 +401,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 			fLOD *= (1.0f - fFrsl);
 
 			// Fresnel based environment reflections
-			cEnv = (cFrsl * fFrsl) * texCUBElod(EnvMapAS, float4(RflW, fLOD)).rgb;
+			cEnv = (cFrsl * fFrsl) * lerp(texCUBElod(EnvMapAS, float4(RflE, fLOD)).rgb, cPln.rgb, cPln.a);
 		}
 #endif
 
@@ -371,7 +409,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 		float fLOD = (1.0f - fRghn) * 8.0f;
 
 		// Add a metallic reflections from a base material
-		cEnv += cRefl3 * (1.0f-iFrsl) * texCUBElod(EnvMapAS, float4(RflW, fLOD)).rgb;
+		cEnv += cRefl3 * (1.0f-iFrsl) * lerp(texCUBElod(EnvMapAS, float4(RflE, fLOD)).rgb, cPln.rgb, cPln.a);
 	}
 
 #endif
@@ -535,6 +573,9 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
 		// ----------------------------------------------------------------------
 
 		float angl = saturate((-dot(gCameraPos, nrmW) - gProxySize) * gInvProxySize);
+		// ORO patch (w) deliberately NOT here: FAST is a per-mesh opt-in chosen for
+		// cheapness and sits at the ps_3_0 temp-register ceiling - adding the planet-
+		// shine shadow overflows it (X4505). FAST keeps the stock unshadowed glow.
 		cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
 
 		// ORO patch (p): fShadow is already in hand here (it scaled dLN above).

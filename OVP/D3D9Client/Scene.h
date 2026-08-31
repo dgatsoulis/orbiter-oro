@@ -293,6 +293,13 @@ public:
 	void DeleteVessel (OBJHANDLE hVessel);
 
 	void AddParticleStream (class D3D9ParticleStream *_pstream);
+
+	// ORO patch (y): count / read back the reconstructed specs of a vessel's STOCK
+	// exhaust particle streams (reentry streams and ORO's own exempted replacement
+	// streams are not counted). Returns the count; fills the outputs when idx is
+	// valid. pos/dir are the stream's attach point and thrust direction, VESSEL frame.
+	int GetExhaustStreamSpec (OBJHANDLE hVessel, int idx, PARTICLESTREAMSPEC* out,
+	                          VECTOR3* pos, VECTOR3* dir);
 	void DelParticleStream (DWORD idx);
 
 	void AddLocalLight(const LightEmitter *le, const vObject *vo);
@@ -548,13 +555,62 @@ private:
 
 	LPDIRECT3DSURFACE9 pEnvDS, pIrradDS, pDepthNormalDS;
 	LPDIRECT3DTEXTURE9 ptWetRefl;		// ORO patch (s) part 6: wet-ground planar reflection, half res
+	// ORO patch (w): PLANET-SHINE SHADOWS - a depth map of the focus vessel's
+	// attachment assembly along the PLANET direction, so Earth glow cannot light
+	// the inside of a closed payload bay. Own target: the sun's LOD targets are
+	// repainted by the sun's own pass right after (the patch-(f) reuse trap).
+	SHADOWMAPPARAM pshn;
+	LPDIRECT3DTEXTURE9 ptPShn;
+	LPDIRECT3DSURFACE9 psPShn;
+	std::set<const class vVessel*> pshnSet;	// this frame's receiver set (the assembly)
+	bool EnsurePShnTarget();
+	// ORO patch (w) part 2: a COPY of the focus vessel's SUN shadow map, taken after
+	// the main scene renders it. Stock binds the sun map in the MAIN SCENE only, so
+	// every secondary render (probe cubes, both mirror passes) draws the assembly
+	// fully sunlit - invisible in stock (probes exclude self), glaring the moment an
+	// interior probe renders its own closed bay. The copy is one frame stale, which
+	// is bounded and invisible; the LOD target itself is repainted by other passes.
+	SHADOWMAPPARAM sunCpy;
+	LPDIRECT3DTEXTURE9 ptSunCpy;
+	LPDIRECT3DSURFACE9 psSunCpy;
+	bool sunCpyLive;
+	bool EnsureSunCpyTarget();
+	LPDIRECT3DTEXTURE9 ptRflPln[2];		// ORO patch (v) part 2: vessel planar mirrors, half res
+	LPDIRECT3DSURFACE9 psRflPln[2];		// ... their level-0 surfaces
+	const class vVessel* pRflPlnVes;	// ... whose planes they hold this frame
+	int nRflPlnLive;					// ... bitmask of planes rendered this frame
+	D3DXVECTOR4 rflPlnEq[2];			// ... plane equation (N, d), camera-centred world
+	float rflPlnDist[2];				// ... RDIST per plane [m] (the curvature warp)
 	LPDIRECT3DSURFACE9 psWetRefl;		// ORO patch (s) part 6: its level-0 surface (the RT binding)
 	LPDIRECT3DSURFACE9 psWetReflDS;		// ORO patch (s) part 6: its depth-stencil
 	bool bWetReflLive;					// ORO patch (s) part 6: the RT holds this frame's mirror
 public:
 	// ORO patch (s) part 6: the terrain shader samples the same mirror as the base tiles
 	LPDIRECT3DTEXTURE9 GetWetReflTex() const { return bWetReflLive ? ptWetRefl : NULL; }
+	// ORO patch (v) part 2: the vessel planar-mirror targets. Filled only for the
+	// vessel whose planes rendered this frame; everyone else gets zero, which is
+	// what keeps the mirrored RT off every other hull.
+	int GetRflPlaneTex(const class vVessel* v, LPDIRECT3DTEXTURE9* out, D3DXVECTOR4* eq, float* dist, int mx) const {
+		if (v != pRflPlnVes || !pRflPlnVes) return 0;
+		int n = 0;
+		for (int i = 0; i < 2 && n < mx; i++) {
+			out[n]  = (nRflPlnLive & (1 << i)) ? ptRflPln[i] : NULL;
+			if (eq)   eq[n]   = rflPlnEq[i];
+			if (dist) dist[n] = rflPlnDist[i];
+			n++;
+		}
+		return n;
+	}
 	bool IsWetReflLive() const { return bWetReflLive; }
+	// ORO patch (w): the planet-shine shadow map, for assembly members this frame.
+	const SHADOWMAPPARAM* GetPShn(const class vVessel* v) const {
+		return (ptPShn && pshnSet.count(v)) ? &pshn : NULL;
+	}
+	// ORO patch (w) part 2: last frame's sun shadow map, for assembly members in
+	// secondary passes (the main scene binds the live map itself).
+	const SHADOWMAPPARAM* GetSunShdCopy(const class vVessel* v) const {
+		return (sunCpyLive && ptSunCpy && pshnSet.count(v)) ? &sunCpy : NULL;
+	}
 private:
 	LPDIRECT3DSURFACE9 psShmDS[SHM_LOD_COUNT];
 	LPDIRECT3DSURFACE9 psShmRT[SHM_LOD_COUNT];

@@ -166,6 +166,7 @@ class gcIPInterface
 public:
 
 	friend class gcCore2;
+	friend class gcCore;		// ORO patch (h) 2026: SetIPISceneDepth reaches pIPI
 
 	enum ipitemplate { Rect, Octagon, Mesh };
 	enum ipicull { None, CCW, CW };
@@ -477,6 +478,25 @@ ote An addon MUST clear its exemptions on unload.
 	gc_interface void ExemptNewStreams(bool bExempt);
 
 	/**
+	* \brief ORO patch (y): read back the reconstructed PARTICLESTREAMSPEC of a
+	*  vessel's STOCK exhaust particle streams - the definitions a vessel author
+	*  wrote in code, which no core API can return (the core copies the spec at
+	*  construction and exposes no getter). Reentry streams and streams created
+	*  under the patch-(o) exemption latch (an addon's own replacements) are not
+	*  counted.
+	* \param hVessel vessel whose streams to query
+	* \param idx 0-based stream index; pass -1 to only count
+	* \param out receives the reconstructed spec (tex is NULL); may be NULL
+	* \param pos receives the stream's attach point, VESSEL frame; may be NULL
+	* \param dir receives the stream's THRUST direction, VESSEL frame; may be NULL -
+	*  it points into the vessel's own thruster storage, which is what lets a
+	*  consumer classify a stream by engine group
+	* \return the number of stock exhaust streams attached to hVessel
+	*/
+	gc_interface int GetExhaustStreamSpec(OBJHANDLE hVessel, int idx, PARTICLESTREAMSPEC* out,
+	                                      VECTOR3* pos, VECTOR3* dir);
+
+	/**
 	* \brief Tune the virtual-cockpit shadow pass (ORO patch f).
 	* \param bEnable false to skip the internal-pass shadow map entirely
 	* \param radius half-width [m] of the ortho box fitted around the eye
@@ -675,6 +695,37 @@ ote A taste knob on the albedo term only - the mirror and the puddle mask ride
 	*   decide whether to lean on real depth or keep a geometric occlusion fallback.
 	*/
 	gc_interface bool HasDepthBuffer();
+
+
+	/**
+	* \brief [ORO patch (h) 2026] Bind the client's live scene depth buffer (GBUF_DEPTH) into
+	*   an IPI shader's sampler, so a full-frame addon pixel shader can ask the same per-pixel
+	*   visibility question patch (g) gave the Sketchpad. Nothing new is rendered and nothing
+	*   new is allocated: the texture already exists, the client already samples it itself
+	*   (Scene::ComputeLocalLightsVisibility), and patch (g) already publishes it. Same shape
+	*   as GetBackBufferHandle - a handle onto a resource that is already there.
+	* \param pIP the interface returned by CreateIPInterface.
+	* \param var the sampler name in the shader (e.g. "tDepth").
+	* \param flags sampler state, e.g. IPF_POINT|IPF_CLAMP - do NOT filter across depth edges.
+	* \return false if the buffer does not exist this session (SunGlare off), so the caller
+	*   degrades rather than assumes, exactly as with CreateTrianglesDepth.
+	* \note The .a channel holds the CAMERA-SPACE DISTANCE in metres. 0 means "nothing was
+	*   drawn at this pixel": RENDERPASS_NORMAL_DEPTH renders only the vessels in the render
+	*   list plus (when the camera is internal) the focus cockpit - no terrain, no sky. So a
+	*   test for "is the scene nearer than X here" must read `sd > 0.1 && sd < X`, never
+	*   `sd < X` alone.
+	* \note Materials below 0.9 alpha are excluded from that pass (patch f part 2), so a
+	*   canopy pane does NOT occlude: through a windscreen this reports the world beyond it.
+	*/
+	gc_interface bool SetIPISceneDepth(gcIPInterface* pIP, const char* var, DWORD flags);
+
+
+	/* [ORO patch (h) part 2] There is deliberately NO addon API for the rain glass:
+	*  the author's `RAIN 1` token in the mesh file is the entire interface. The client
+	*  reads it itself at clbkStoreMeshPersistent time (it is the one party told the
+	*  mesh's FILENAME) - see RainGlassStoreScan in Mesh.cpp. Any vessel whose preloaded
+	*  mesh carries the token gets the negated-depth window mask, with nothing to
+	*  configure anywhere. */
 
 
 	/**

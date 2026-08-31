@@ -182,6 +182,9 @@ public:
 	static D3DXHANDLE	eSpecMap;
 	static D3DXHANDLE	eEmisMap;
 	static D3DXHANDLE	eEnvMapA;
+	static D3DXHANDLE	eEnvBoxC, eEnvBoxX, eEnvBoxY, eEnvBoxZ, eEnvPrbP;	// ORO patch (v)
+	static D3DXHANDLE	ePlnMap, ePlnCtl, ePlnEq;	// ORO patch (v) part 2: planar mirror
+	static D3DXHANDLE	ePShnMap, ePShnLVP, ePShnSHD;	// ORO patch (w): planet-shine shadows
 	static D3DXHANDLE	eEnvMapB;
 	static D3DXHANDLE	eReflMap;
 	static D3DXHANDLE	eMetlMap;

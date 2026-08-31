@@ -217,7 +217,7 @@ FONT 8, "Ms Shell Dlg"
 
 
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_UK
-IDD_D3D9SETUP DIALOGEX 0, 0, 545, 378
+IDD_D3D9SETUP DIALOGEX 0, 0, 545, 420
 STYLE DS_MODALFRAME | DS_SETFONT | WS_CAPTION | WS_POPUP | WS_SYSMENU
 CAPTION "D3D9Client Advanced Setup"
 FONT 8, "MS Sans Serif", 0, 0, 0
@@ -243,14 +243,14 @@ FONT 8, "MS Sans Serif", 0, 0, 0
     AUTOCHECKBOX    "Enable cloud normal maps", IDC_CLOUDNORM, 20, 305, 99, 8, 0, WS_EX_LEFT
     AUTOCHECKBOX    "Enable GDI Overlay", IDC_GDIOVERLAY, 20, 318, 79, 8, 0, WS_EX_LEFT
     AUTOCHECKBOX    "Enable absolute animation handling", IDC_ABSANIM, 20, 331, 127, 8, 0, WS_EX_LEFT
-    AUTOCHECKBOX    "Enable terrain flattening", IDC_FLATS, 370, 286, 90, 8, 0, WS_EX_LEFT
+    AUTOCHECKBOX    "Enable terrain flattening", IDC_FLATS, 370, 363, 90, 8, 0, WS_EX_LEFT
     AUTOCHECKBOX    "Enable advanced texture maps", IDC_NORMALMAPS, 20, 252, 114, 8, 0, WS_EX_LEFT
     AUTOCHECKBOX    "Enable improved glass shading", IDC_GLASSSHADE, 20, 265, 113, 8, 0, WS_EX_LEFT
     AUTOCHECKBOX    "Disable near clip plane compatibility mode", IDC_NEARPLANE, 20, 279, 147, 8, 0, WS_EX_LEFT
     CONTROL         "", IDC_LODBIAS, TRACKBAR_CLASS, WS_TABSTOP | TBS_AUTOTICKS | TBS_TOP, 256, 147, 95, 20, WS_EX_LEFT
     CONTROL         "", IDC_MICROBIAS, TRACKBAR_CLASS, WS_TABSTOP | TBS_AUTOTICKS | TBS_TOP, 435, 222, 95, 20, WS_EX_LEFT
-    PUSHBUTTON      "D3D9Client Credits", IDC_CREDITS, 5, 360, 80, 14, BS_FLAT, WS_EX_LEFT
-    PUSHBUTTON      "Create symbolic links", IDC_SYMBOLIC, 95, 360, 85, 14, BS_FLAT, WS_EX_LEFT
+    PUSHBUTTON      "D3D9Client Credits", IDC_CREDITS, 5, 402, 80, 14, BS_FLAT, WS_EX_LEFT
+    PUSHBUTTON      "Create symbolic links", IDC_SYMBOLIC, 95, 402, 85, 14, BS_FLAT, WS_EX_LEFT
     COMBOBOX        IDC_FONT, 270, 23, 80, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
     COMBOBOX        IDC_DEBUG, 270, 65, 80, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
     COMBOBOX        IDC_MIPMAPS, 263, 200, 91, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
@@ -268,7 +268,7 @@ FONT 8, "MS Sans Serif", 0, 0, 0
     COMBOBOX        IDC_ARCHIVE, 85, 60, 90, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
     COMBOBOX        IDC_CAMMODE, 440, 106, 90, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
     COMBOBOX        IDC_ENVFACES, 440, 122, 90, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
-    DEFPUSHBUTTON   "OK", IDOK, 460, 355, 75, 19, 0, WS_EX_LEFT
+    DEFPUSHBUTTON   "OK", IDOK, 460, 397, 75, 19, 0, WS_EX_LEFT
     GROUPBOX        "Surface texture load options", IDC_STATIC, 5, 5, 175, 75, 0, WS_EX_LEFT
     GROUPBOX        "SketchPad settings", IDC_STATIC, 190, 5, 170, 40, 0, WS_EX_LEFT
     LTEXT           "Max. load frequency [Hz]:", IDC_STATIC, 26, 29, 85, 8, SS_LEFT, WS_EX_LEFT
@@ -304,12 +304,23 @@ FONT 8, "MS Sans Serif", 0, 0, 0
     LTEXT           "Texture Bias", IDC_STATIC, 201, 153, 40, 8, SS_LEFT, WS_EX_LEFT
     LTEXT           "Mesh resolution", IDC_STATIC, 200, 172, 50, 8, SS_LEFT, WS_EX_LEFT
     AUTOCHECKBOX    "Enable debug break", IDC_BREAK, 200, 99, 80, 8, 0, WS_EX_LEFT
-    AUTOCHECKBOX    "Enable sun glare", IDC_ESUNGLARE, 370, 274, 69, 8, 0, WS_EX_LEFT
-    AUTOCHECKBOX    "Enable local lights glare", IDC_ELIGHTSGLARE, 370, 299, 90, 8, NOT WS_VISIBLE | WS_DISABLED, WS_EX_LEFT
-    AUTOCHECKBOX    "Enable dynamic ambient light", IDC_EIRRAD, 370, 262, 107, 8, 0, WS_EX_LEFT
+    AUTOCHECKBOX    "Enable sun glare", IDC_ESUNGLARE, 370, 366, 69, 8, 0, WS_EX_LEFT
+    AUTOCHECKBOX    "Enable local lights glare", IDC_ELIGHTSGLARE, 370, 356, 90, 8, NOT WS_VISIBLE | WS_DISABLED, WS_EX_LEFT
+    AUTOCHECKBOX    "Enable dynamic ambient light", IDC_EIRRAD, 370, 354, 107, 8, 0, WS_EX_LEFT
     COMBOBOX        IDC_EARTHVISCFG, 85, 212, 90, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
     LTEXT           "Earth visual config", IDC_STATIC, 17, 215, 59, 9, SS_LEFT, WS_EX_LEFT
-    AUTOCHECKBOX    "Enable shader cache for faster startup", IDC_ESCACHE, 370, 250, 136, 8, 0, WS_EX_LEFT
+    AUTOCHECKBOX    "Enable shader cache for faster startup", IDC_ESCACHE, 370, 342, 136, 8, 0, WS_EX_LEFT
+    GROUPBOX        "Particle lighting (ORO)", IDC_STATIC, 371, 250, 169, 88, 0, WS_EX_LEFT
+    LTEXT           "Diffuse sun light", IDC_STATIC, 381, 265, 55, 8, SS_LEFT, WS_EX_LEFT
+    COMBOBOX        IDC_PRTLIGHT, 440, 262, 90, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
+    LTEXT           "Shadow strength (diffuse)", IDC_STATIC, 381, 281, 82, 8, SS_LEFT, WS_EX_LEFT
+    CONTROL         "", IDC_PRTSHADOW, "msctls_trackbar32", WS_TABSTOP | TBS_HORZ | TBS_BOTH | TBS_NOTICKS, 464, 279, 68, 12, WS_EX_LEFT
+    LTEXT           "Dawn tint lead", IDC_STATIC, 381, 295, 82, 8, SS_LEFT, WS_EX_LEFT
+    CONTROL         "", IDC_PRTLEAD, "msctls_trackbar32", WS_TABSTOP | TBS_HORZ | TBS_BOTH | TBS_NOTICKS, 464, 293, 68, 12, WS_EX_LEFT
+    LTEXT           "Dawn tint depth", IDC_STATIC, 381, 309, 82, 8, SS_LEFT, WS_EX_LEFT
+    CONTROL         "", IDC_PRTSAT, "msctls_trackbar32", WS_TABSTOP | TBS_HORZ | TBS_BOTH | TBS_NOTICKS, 464, 307, 68, 12, WS_EX_LEFT
+    LTEXT           "Dawn tint bloom", IDC_STATIC, 381, 323, 82, 8, SS_LEFT, WS_EX_LEFT
+    CONTROL         "", IDC_PRTBLOOM, "msctls_trackbar32", WS_TABSTOP | TBS_HORZ | TBS_BOTH | TBS_NOTICKS, 464, 321, 68, 12, WS_EX_LEFT
     AUTOCHECKBOX    "Enable increased atmosphere quality", IDC_EAQUALITY, 20, 344, 131, 8, 0, WS_EX_LEFT
     COMBOBOX        IDC_MESHRES, 263, 170, 50, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
     COMBOBOX        IDC_TILECOUNT, 263, 185, 50, 15, WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
@@ -512,7 +523,7 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_UK
             VALUE "FileDescription", "Render engine plugin for Orbiter Space Flight Simulator"
             VALUE "FileVersion", "30.7.0.0"
             VALUE "InternalName", "D3D9Client"
-            VALUE "LegalCopyright", "Copyright © 2010 - 2017"
+            VALUE "LegalCopyright", "Copyright ï¿½ 2010 - 2017"
             VALUE "OriginalFilename", "D3D9Client.dll"
             VALUE "ProductName", "D3D9Client"
             VALUE "ProductVersion", "30.7.0.0"

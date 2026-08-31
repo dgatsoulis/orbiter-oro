@@ -568,6 +568,23 @@ inline float D3DVAL (double x)
 
 int fgets2(char *buf, int cmax, FILE *file, DWORD param=0);
 
+// ORO TEMP DIAGNOSTIC (hang trace): open-append-close per line, so every line
+// survives a hang or a kill. Remove after the exp-mode load hang is found.
+inline void OroHangTrace(const char* fmt, ...)
+{
+	static int n = 0;
+	if (n >= 4000) return;
+	n++;
+	FILE* f = NULL;
+	if (fopen_s(&f, "ORO_hang_trace.log", "a") != 0 || !f) return;
+	va_list ap; va_start(ap, fmt);
+	vfprintf(f, fmt, ap);
+	va_end(ap);
+	fprintf(f, "\n");
+	fclose(f);
+}
+
+
 float D3DXVec3Angle(D3DXVECTOR3 a, D3DXVECTOR3 b);
 D3DXVECTOR3 Perpendicular(D3DXVECTOR3 *a);
 

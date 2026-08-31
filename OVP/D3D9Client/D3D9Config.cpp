@@ -84,6 +84,12 @@ void D3D9Config::Reset ()
 	PresentLocation		= 1;
 	PlanetTileLoadFlags	= 0x3;
 	TerrainShadowing	= 2;
+	ParticleLight		= 2;			// ORO patch (x): brightness + colour by default
+	ParticleShadow		= 1.0;			// ORO patch (x): stock shadow strength by default
+	ParticleTintLead	= 0.10;			// ORO patch (x): the smoke runs ~6 deg of sun ahead of the hull
+	ParticleTintSat		= 1.6;			// ORO patch (x): dawn hue deepened (a grey medium washes tint out)
+	ParticleTintBloom	= 2.34;			// ORO patch (x): tinted overdrive into the bloom
+										// (all three: HIS settled slider positions, 2026-08-30 dawn ascent)
 	LabelDisplayFlags	= LABEL_DISPLAY_RECORD | LABEL_DISPLAY_REPLAY;
 	CloudMicro			= 1;
 	GDIOverlay			= 0;
@@ -150,13 +156,18 @@ bool D3D9Config::ReadParams ()
 	if (oapiReadItem_float (hFile, (char*)"BumpMapAmplitude", d))		BumpAmp = max(0.1, min(10.0, d));
 	if (oapiReadItem_float (hFile, (char*)"PlanetGlow", d))			PlanetGlow = max(0.01, min(2.5, d));
 	if (oapiReadItem_int   (hFile, (char*)"EnvMapSize", i))			EnvMapSize = max(64, min(512, i));
-	if (oapiReadItem_int   (hFile, (char*)"EnvMapMode", i))			EnvMapMode = max(0, min(2, i));
+	if (oapiReadItem_int   (hFile, (char*)"EnvMapMode", i))			EnvMapMode = max(0, min(3, i));	// ORO patch (v): 3 = Full Scene ORO (exp); stock's own clamp reads it as 2
 	if (oapiReadItem_int   (hFile, (char*)"EnvMapFaces", i))			EnvMapFaces = max(1, min(3, i));
 	if (oapiReadItem_int   (hFile, (char*)"ShadowMapMode", i))			ShadowMapMode = max(0, min(3, i));
 	if (oapiReadItem_int   (hFile, (char*)"ShadowMapFilter", i))	 	ShadowFilter = max(0, min(5, i));
 	if (oapiReadItem_int   (hFile, (char*)"ShadowMapSize", i))			ShadowMapSize = max(512, min(4096, i));
 	if (oapiReadItem_int   (hFile, (char*)"EnableGlass", i))			EnableGlass = max(0, min(1, i));
 	if (oapiReadItem_int   (hFile, (char*)"TerrainShadowing", i))		TerrainShadowing = max(0, min(2, i));
+	if (oapiReadItem_int   (hFile, (char*)"ParticleLight", i))			ParticleLight = max(0, min(2, i));
+	if (oapiReadItem_float (hFile, (char*)"ParticleShadow", d))			ParticleShadow = max(0.0, min(1.0, d));
+	if (oapiReadItem_float (hFile, (char*)"ParticleTintLead", d))		ParticleTintLead = max(0.0, min(0.2, d));
+	if (oapiReadItem_float (hFile, (char*)"ParticleTintSat", d))		ParticleTintSat = max(1.0, min(4.0, d));
+	if (oapiReadItem_float (hFile, (char*)"ParticleTintBloom", d))		ParticleTintBloom = max(1.0, min(3.0, d));
 	if (oapiReadItem_int   (hFile, (char*)"EnableMeshDbg", i))			EnableMeshDbg = max(0, min(1, i));
 	if (oapiReadItem_int   (hFile, (char*)"TileMipmaps", i))			TileMipmaps = max(0, min(2, i));
 	if (oapiReadItem_int   (hFile, (char*)"TextureMips", i))			TextureMips = max(0, min(1, i));
@@ -276,6 +287,11 @@ void D3D9Config::WriteParams ()
 	WP_INT("ShadowMapFilter", ShadowFilter);
 	WP_INT("ShadowMapSize", ShadowMapSize);
 	WP_INT("TerrainShadowing", TerrainShadowing);
+	WP_INT("ParticleLight", ParticleLight);
+	WP_FLT("ParticleShadow", ParticleShadow);
+	WP_FLT("ParticleTintLead", ParticleTintLead);
+	WP_FLT("ParticleTintSat", ParticleTintSat);
+	WP_FLT("ParticleTintBloom", ParticleTintBloom);
 	WP_INT("EnableGlass", EnableGlass);
 	WP_INT("EnableMeshDbg", EnableMeshDbg);
 	WP_INT("TileMipmaps", TileMipmaps);
@@ -382,6 +398,11 @@ static void WriteParams_stock_disabled (D3D9Config*)
 	oapiWriteItem_int   (hFile, (char*)"ShadowMapFilter", ShadowFilter);
 	oapiWriteItem_int   (hFile, (char*)"ShadowMapSize", ShadowMapSize);
 	oapiWriteItem_int   (hFile, (char*)"TerrainShadowing", TerrainShadowing);
+	oapiWriteItem_int   (hFile, (char*)"ParticleLight", ParticleLight);
+	oapiWriteItem_float (hFile, (char*)"ParticleShadow", ParticleShadow);
+	oapiWriteItem_float (hFile, (char*)"ParticleTintLead", ParticleTintLead);
+	oapiWriteItem_float (hFile, (char*)"ParticleTintSat", ParticleTintSat);
+	oapiWriteItem_float (hFile, (char*)"ParticleTintBloom", ParticleTintBloom);
 	oapiWriteItem_int   (hFile, (char*)"EnableGlass", EnableGlass);
 	oapiWriteItem_int   (hFile, (char*)"EnableMeshDbg", EnableMeshDbg);
 	oapiWriteItem_int   (hFile, (char*)"TileMipmaps", TileMipmaps);

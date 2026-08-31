@@ -75,6 +75,9 @@ D3DXHANDLE D3D9Effect::eTex3 = 0;		// Tertiary texture
 D3DXHANDLE D3D9Effect::eSpecMap = 0;
 D3DXHANDLE D3D9Effect::eEmisMap = 0;
 D3DXHANDLE D3D9Effect::eEnvMapA = 0;
+D3DXHANDLE D3D9Effect::eEnvBoxC = 0, D3D9Effect::eEnvBoxX = 0, D3D9Effect::eEnvBoxY = 0, D3D9Effect::eEnvBoxZ = 0, D3D9Effect::eEnvPrbP = 0;	// ORO patch (v)
+D3DXHANDLE D3D9Effect::ePlnMap = 0, D3D9Effect::ePlnCtl = 0, D3D9Effect::ePlnEq = 0;	// ORO patch (v) part 2
+D3DXHANDLE D3D9Effect::ePShnMap = 0, D3D9Effect::ePShnLVP = 0, D3D9Effect::ePShnSHD = 0;	// ORO patch (w)
 D3DXHANDLE D3D9Effect::eEnvMapB = 0;
 D3DXHANDLE D3D9Effect::eReflMap = 0;
 D3DXHANDLE D3D9Effect::eRghnMap = 0;
@@ -489,6 +492,17 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
 	eSpecMap	  = FX->GetParameterByName(0,"gSpecMap");
 	eEmisMap	  = FX->GetParameterByName(0,"gEmisMap");
 	eEnvMapA	  = FX->GetParameterByName(0,"gEnvMapA");
+	eEnvBoxC	  = FX->GetParameterByName(0,"gEnvBoxC");	// ORO patch (v)
+	eEnvBoxX	  = FX->GetParameterByName(0,"gEnvBoxX");
+	eEnvBoxY	  = FX->GetParameterByName(0,"gEnvBoxY");
+	eEnvBoxZ	  = FX->GetParameterByName(0,"gEnvBoxZ");
+	eEnvPrbP	  = FX->GetParameterByName(0,"gEnvPrbP");
+	ePlnMap		  = FX->GetParameterByName(0,"gPlnMap");	// ORO patch (v) part 2
+	ePlnCtl		  = FX->GetParameterByName(0,"gPlnCtl");
+	ePlnEq		  = FX->GetParameterByName(0,"gPlnEq");
+	ePShnMap	  = FX->GetParameterByName(0,"gPShnMap");	// ORO patch (w)
+	ePShnLVP	  = FX->GetParameterByName(0,"gPShnLVP");
+	ePShnSHD	  = FX->GetParameterByName(0,"gPShnSHD");
 	eEnvMapB	  = FX->GetParameterByName(0,"gEnvMapB");
 	eReflMap	  = FX->GetParameterByName(0,"gReflMap");
 	eRghnMap	  = FX->GetParameterByName(0,"gRghnMap");

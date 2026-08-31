@@ -63,7 +63,7 @@ public:
 	int LightConfig;				///< Light emitter configuration
 	int NVPerfHUD;					///< ??? (0,1)
 	int EnvMapSize;					///< Environment map size (64...512)
-	int EnvMapMode;					///< Environment map mode (0=disabled, 1=planet only, 2=full scene)
+	int EnvMapMode;					///< Environment map mode (0=disabled, 1=planet only, 2=full scene, 3=full scene ORO exp - patch (v))
 	int EnvMapFaces;				///< Number of environment map faces render per frame (1..6, default=1)
 	int EnableGlass;				///< Enable improved glass shading (Fresnel reflection)
 	int EnableMeshDbg;				///< Enable mesh debugger
@@ -71,6 +71,11 @@ public:
 	int ShadowFilter;				///< Shadow Mapping Filter
 	int ShadowMapSize;				///< Shadow Map size
 	int TerrainShadowing;			///< Terrain Shadowing mode (0=None, 1=Stencil, 2=Projected, default=1)
+	int ParticleLight;				///< ORO patch (x): DIFFUSE particle sun lighting (0=Off/stock always-lit, 1=Brightness only, 2=Brightness+colour, default=2)
+	double ParticleShadow;			///< ORO patch (x): DIFFUSE particle ground-shadow strength 0..1 (0=no shadow, 1=stock, default=1)
+	double ParticleTintLead;		///< ORO patch (x): dawn-hue lead in sin-elevation, 0..0.20 (the smoke reads the sun this much HIGHER than it is, default=0.10)
+	double ParticleTintSat;			///< ORO patch (x): dawn-hue depth 1..4 (1 = the hull's own hue, default=1.6)
+	double ParticleTintBloom;		///< ORO patch (x): sunlit tinted overdrive 1..3 (brightens + blooms the tinted sun term, 1 = off, default=2.34)
 	int CustomCamMode;				///< Custom Camera Mode
 	int TileMipmaps;				///< Enable surface tile mipmaps
 	int ShaderDebug;				///< Shader Debug Logging enable flag (0=disabled, 1=enabled)

@@ -16,6 +16,8 @@
 #include "D3D9Config.h"
 #include "DebugControls.h"
 #include "VectorHelpers.h"
+#include "OapiExtension.h"	// ORO patch (h) part 2: GetMeshDir for the RAIN scan
+#include <map>				// ORO patch (h) part 2: the rain-glass store
 
 #pragma warning(push)
 #pragma warning(disable : 4838)
@@ -176,6 +178,150 @@ void MeshBuffer::Map(LPDIRECT3DDEVICE9 pDev)
 // Mesh Implementation
 // ======================================================================================
 //
+// ===========================================================================================
+// ORO patch (h) part 2 - THE RAIN-GLASS STORE (2026-08-26, his design: "we want this to
+// work for ANY vessel that has a VC mesh group with RAIN 1").
+//
+// The author marks window groups in the MESH FILE with a `RAIN 1` line in the group's
+// option block (before its GEOM). The core's group parser SKIPS unknown tokens (verified
+// in Orbiter's Mesh.cpp: the token loop has no else branch) and stores nothing - so the
+// line is safe in any mesh, invisible to stock Orbiter and to the vessel, and someone
+// who can see the FILE has to read it. That someone is the client, because the client is
+// the one who is TOLD THE FILENAME: Orbiter::LoadMeshGlobal calls
+// clbkStoreMeshPersistent(hMesh, fname) with the resource name, and the full path is
+// MeshDir + fname + ".msh", both of which the client already has (OapiExtension).
+//
+// The scan is two-stage so that the 99% of meshes with no RAIN token cost one streaming
+// pass and no line parsing: a chunked search for the literal "RAIN" first (UPPERCASE
+// REQUIRED - that is the documented convention), then, only on a hit, a line walk that
+// counts GEOM blocks (group index = GEOMs passed) and records the groups whose pending
+// `RAIN 1` preceded them. Results keyed by TEMPLATE HANDLE; instances inherit at
+// construction, so re-instantiation (AddMesh rebuilds the list) costs nothing.
+// Meshes never preloaded (per-instance oapiLoadMesh copies) have no filename to scan and
+// simply get no rain - the documented limitation, and VC meshes are preloaded by
+// convention. Cleared with the mesh manager at session close: template handles recycle.
+// ===========================================================================================
+static std::map<MESHHANDLE, std::vector<WORD> > g_rainGlassStore;
+
+// ORO patch (v): the per-probe box-projection table - see Mesh.h.
+D3D9Mesh::ENVPRB D3D9Mesh::sEnvPrb[4] = {};
+int D3D9Mesh::sEnvPrbN = 0;
+
+void D3D9Mesh::SetEnvProbes(const ENVPRB* p, int n)
+{
+	sEnvPrbN = (n < 0) ? 0 : ((n > 4) ? 4 : n);
+	for (int i = 0; i < sEnvPrbN; i++) sEnvPrb[i] = p[i];
+}
+
+// Push one probe's box parameters (or the disable state) into the effect. Called
+// beside every cube bind, so the uniforms can never be stale from another vessel.
+static void PushEnvBox(const D3D9Mesh::ENVPRB* p)
+{
+	static const D3DXVECTOR4 off(0, 0, 0, 0);
+	if (p && p->C.w > 0.5f) {
+		D3D9Effect::FX->SetVector(D3D9Effect::eEnvBoxC, &p->C);
+		D3D9Effect::FX->SetVector(D3D9Effect::eEnvBoxX, &p->X);
+		D3D9Effect::FX->SetVector(D3D9Effect::eEnvBoxY, &p->Y);
+		D3D9Effect::FX->SetVector(D3D9Effect::eEnvBoxZ, &p->Z);
+		D3D9Effect::FX->SetVector(D3D9Effect::eEnvPrbP, &p->P);
+	}
+	else D3D9Effect::FX->SetVector(D3D9Effect::eEnvBoxC, &off);
+}
+
+// ORO patch (v) part 2: the planar-mirror targets - see Mesh.h.
+LPDIRECT3DTEXTURE9 D3D9Mesh::sPlnTex[2] = {};
+D3DXVECTOR4 D3D9Mesh::sPlnEq[2] = {};
+float D3D9Mesh::sPlnDist[2] = {};
+int D3D9Mesh::sPlnN = 0;
+
+void D3D9Mesh::SetRflPlanes(LPDIRECT3DTEXTURE9* t, const D3DXVECTOR4* eq, const float* dist, int n)
+{
+	sPlnN = (n < 0) ? 0 : ((n > 2) ? 2 : n);
+	for (int i = 0; i < 2; i++) {
+		sPlnTex[i]  = (t && i < sPlnN) ? t[i] : NULL;
+		sPlnEq[i]   = (eq && i < sPlnN) ? eq[i] : D3DXVECTOR4(0, 0, 0, 0);
+		sPlnDist[i] = (dist && i < sPlnN) ? dist[i] : 5.0f;
+	}
+}
+
+// Bind one plane's mirrored-scene RT (or the disable state). gPlnCtl.z is the
+// enable; .xy is 1/screen so VPOS becomes a texture coordinate in the shader.
+static void PushRflPlane(int idx1)
+{
+	static const D3DXVECTOR4 off(0, 0, 0, 0);
+	const int i = idx1 - 1;
+	if (idx1 > 0 && i < D3D9Mesh::sPlnN && D3D9Mesh::sPlnTex[i]) {
+		// the plane equation + RDIST feed the shader's CURVATURE warp (PBR.fx)
+		D3D9Effect::FX->SetVector(D3D9Effect::ePlnEq, &D3D9Mesh::sPlnEq[i]);
+		D3DXVECTOR4 ctl(1.0f / (float)max(1, (int)D3D9Effect::gc->GetScene()->ViewW()),
+		                1.0f / (float)max(1, (int)D3D9Effect::gc->GetScene()->ViewH()), 1.0f,
+		                D3D9Mesh::sPlnDist[i]);
+		D3D9Effect::FX->SetTexture(D3D9Effect::ePlnMap, D3D9Mesh::sPlnTex[i]);
+		D3D9Effect::FX->SetVector(D3D9Effect::ePlnCtl, &ctl);
+	}
+	else D3D9Effect::FX->SetVector(D3D9Effect::ePlnCtl, &off);
+}
+
+void RainGlassClearStore()
+{
+	g_rainGlassStore.clear();
+}
+
+void RainGlassStoreScan(MESHHANDLE hMesh, const char *fname)
+{
+	if (!hMesh || !fname || !fname[0]) return;
+
+	char path[MAX_PATH];
+	sprintf_s(path, "%s\\%s.msh", OapiExtension::GetMeshDir(), fname);
+	FILE *f = NULL;
+	if (fopen_s(&f, path, "rb") != 0 || !f) return;
+
+	// Stage 1: is the literal token anywhere in the file? Chunked, with a 3-byte carry
+	// so a token straddling a chunk boundary cannot hide.
+	bool found = false;
+	{
+		char buf[65536 + 4]; size_t carry = 0, n;
+		while (!found && (n = fread(buf + carry, 1, sizeof(buf) - carry - 1, f)) > 0) {
+			buf[carry + n] = 0;
+			if (strstr(buf, "RAIN")) { found = true; break; }
+			const size_t tot = carry + n;
+			carry = (tot >= 3) ? 3 : tot;
+			memmove(buf, buf + tot - carry, carry);
+		}
+	}
+	if (!found) { fclose(f); return; }
+
+	// Stage 2: the precise walk. Vertex/index lines start with digits or a sign, so the
+	// two token tests cannot misfire inside geometry data.
+	fseek(f, 0, SEEK_SET);
+	std::vector<WORD> grps;
+	char line[256]; int geom = 0; bool pend = false;
+	while (fgets(line, sizeof(line), f)) {
+		if (strncmp(line, "RAIN", 4) == 0) {
+			int on = 0;
+			pend = (sscanf_s(line + 4, "%d", &on) == 1 && on != 0);
+		}
+		else if (_strnicmp(line, "GEOM", 4) == 0) {
+			if (pend && geom <= 0xFFFF) grps.push_back((WORD)geom);
+			pend = false; geom++;
+		}
+	}
+	fclose(f);
+
+	if (!grps.empty()) {
+		g_rainGlassStore[hMesh] = grps;
+		// Into Orbiter.log deliberately - it is the log the addon's users are read from.
+		oapiWriteLogV("D3D9: rain glass - %d RAIN group(s) in %s.", (int)grps.size(), fname);
+	}
+	else g_rainGlassStore.erase(hMesh);   // a re-store after the author removed the tokens
+}
+
+static const std::vector<WORD>* RainGlassLookup(MESHHANDLE hMesh)
+{
+	std::map<MESHHANDLE, std::vector<WORD> >::const_iterator it = g_rainGlassStore.find(hMesh);
+	return (it == g_rainGlassStore.end()) ? NULL : &it->second;
+}
+
 void D3D9Mesh::Null(const char *meshName /* = NULL */)
 {
 	nGrp = 0;
@@ -232,6 +378,10 @@ D3D9Mesh::D3D9Mesh(MESHHANDLE hMesh, bool asTemplate, D3DXVECTOR3 *reorig, float
 	Null();
 	LoadMeshFromHandle(hMesh, reorig, scale);
 	bIsTemplate = asTemplate;
+	// ORO patch (h) part 2: a template handle that was scanned at store time carries
+	// its authored rain-glass groups; a per-instance copy handle misses and gets none.
+	const std::vector<WORD>* rg = RainGlassLookup(hMesh);
+	if (rg) rainGrp = *rg;
 	MeshCatalog.insert(this);
 	if (pBuf) pBuf->Map(pDev);
 }
@@ -328,6 +478,14 @@ D3D9Mesh::D3D9Mesh(MESHHANDLE hMesh, const D3D9Mesh &hTemp)
 	if (nGrp == 0) return;
 
 	strcpy_s(name, ARRAYSIZE(name), hTemp.name);
+	// ORO patch (h) part 2: instances take the rain-glass list from the STORE by the
+	// template handle they were given, falling back to whatever the stored mesh
+	// carries. The store is the ground truth; the fallback only matters if some path
+	// ever constructs instances without a scanned template.
+	{
+		const std::vector<WORD>* rg = RainGlassLookup(hMesh);
+		rainGrp = rg ? *rg : hTemp.rainGrp;
+	}
 
 	// Use Template's Vertex Data directly, no need for a local copy unless locally modified. 
 	pBuf = hTemp.pBuf;
@@ -1598,6 +1756,9 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
 
 
 	if (nEnv >= 1 && pEnv[0]) FX->SetTexture(eEnvMapA, pEnv[0]);
+	int curEnvCam = 0;   // ORO patch (v): which probe is bound right now
+	PushEnvBox((sEnvPrbN > 0) ? &sEnvPrb[0] : NULL);   // never stale from another vessel
+	int curPln = -1;     // ORO patch (v) part 2: which planar RT is bound (-1 = push pending)
 
 
 	UINT numPasses = 0;
@@ -1609,6 +1770,27 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
 
 	for (DWORD g=0; g<nGrp; g++) {
 
+		// ORO patch (v): a group assigned to another reflection probe swaps the cube
+		// before its draw. Missing/unrendered probes fall back to 0, so a config that
+		// declares cameras before their groups exist degrades to today's look, never
+		// to a black reflection. One SetTexture only when the assignment CHANGES -
+		// groups sharing a probe cost nothing.
+		if (nEnv > 1) {
+			int want = Grp[g].EnvCam;
+			if (want >= nEnv || !pEnv[want]) want = 0;
+			if (want != curEnvCam && pEnv[want]) {
+				FX->SetTexture(eEnvMapA, pEnv[want]);
+				PushEnvBox((want < sEnvPrbN) ? &sEnvPrb[want] : NULL);   // ORO patch (v)
+				curEnvCam = want;
+			}
+		}
+		// ORO patch (v) part 2: the PLANAR mirror, per group - exact where declared,
+		// silently absent everywhere else (sPlnN is 0 for vessels without planes and
+		// on every non-main pass, so the enable can never leak).
+		{
+			const int wp = (sPlnN > 0) ? (int)Grp[g].RflPlane : 0;
+			if (wp != curPln) { PushRflPlane(wp); curPln = wp; }
+		}
 
 		bool bHUD = (Grp[g].MFDScreenId == 0x100);
 
@@ -2056,6 +2238,9 @@ void D3D9Mesh::RenderSimplified(const LPD3DXMATRIX pW, LPDIRECT3DCUBETEXTURE9 *p
 	FX->SetValue(eLights, Locals, sizeof(LightStruct) * Config->MaxLights());
 
 	if (nEnv >= 1 && pEnv[0]) FX->SetTexture(eEnvMapA, pEnv[0]);
+	int curEnvCam = 0;   // ORO patch (v): as in Render() - the simplified path too
+	PushEnvBox((sEnvPrbN > 0) ? &sEnvPrb[0] : NULL);
+	PushRflPlane(0);     // ORO patch (v) part 2: no planar mirrors on this path
 
 	bool bRefl = true;
 	WORD CurrentShader = 0xFFFF;
@@ -2067,6 +2252,17 @@ void D3D9Mesh::RenderSimplified(const LPD3DXMATRIX pW, LPDIRECT3DCUBETEXTURE9 *p
 	// Render MeshGroups ----------------------------------------------------
 	//
 	for (DWORD g = 0; g<nGrp; g++) {
+
+		// ORO patch (v): per-group probe swap - see Render() for the rules
+		if (nEnv > 1) {
+			int want = Grp[g].EnvCam;
+			if (want >= nEnv || !pEnv[want]) want = 0;
+			if (want != curEnvCam && pEnv[want]) {
+				FX->SetTexture(eEnvMapA, pEnv[want]);
+				PushEnvBox((want < sEnvPrbN) ? &sEnvPrb[want] : NULL);   // ORO patch (v)
+				curEnvCam = want;
+			}
+		}
 
 		// Check skip conditions --------------------------------------------
 		//
@@ -2782,8 +2978,19 @@ void D3D9Mesh::RenderShadowMap(const LPD3DXMATRIX pW, const LPD3DXMATRIX pVP, in
 
 	for (DWORD g = 0; g < nGrp; g++)
 	{
-		if (Grp[g].UsrFlag & 0x2) continue;
-		if (Grp[g].UsrFlag & 0x1) continue;
+		// ORO patch (h) part 2: the rain-glass membership test runs BEFORE the two
+		// UsrFlag skips, because authored glass routinely carries 0x1 (no-shadow) -
+		// the stock DeltaGlider's VC canopy does - and a declared group that exits on
+		// that line never reaches the declaration that was made specifically about it.
+		// Shadow-map behaviour is untouched: bRainGlass is only ever true at opt == 1.
+		bool bRainGlass = false;
+		if (opt == 1 && !rainGrp.empty())
+			for (size_t k = 0; k < rainGrp.size(); k++) if (rainGrp[k] == g) { bRainGlass = true; break; }
+
+		if (!bRainGlass) {
+			if (Grp[g].UsrFlag & 0x2) continue;
+			if (Grp[g].UsrFlag & 0x1) continue;
+		}
 
 		// --- ORO patch (f), part 2: TRANSPARENT MATERIALS MUST NOT CAST OPAQUE SHADOWS
 		// A group escapes the shadow map today only by carrying UsrFlag 0x1 (no-shadow)
@@ -2824,9 +3031,35 @@ void D3D9Mesh::RenderShadowMap(const LPD3DXMATRIX pW, const LPD3DXMATRIX pVP, in
 		// clearly not opaque does not block. If anything it is MORE obviously right
 		// here, because depth is a visibility question and shadowing is only one
 		// consumer of it.
-		if (Grp[g].MtrlIdx != SPEC_DEFAULT && Grp[g].MtrlIdx < nMtrl
+		//
+		// --- ORO patch (h) part 2: AUTHORED WINDOW GLASS ------------------------------
+		// A group in this mesh's rainGrp list - filled at construction from the store
+		// that clbkStoreMeshPersistent's scan built, ultimately from the author's
+		// `RAIN 1` token in the mesh file (see RainGlassStoreScan at the top of this
+		// file). In THIS pass only (opt == 1, the normal/depth buffer - never the
+		// shadow map, where glass must go on not casting), such a group is rendered
+		// DESPITE its transparency, and NormalDepth_PS writes its camera distance
+		// NEGATED. That one sign carries the whole feature: a full-frame effect shader
+		// (via patch (h)'s SetIPISceneDepth) reads `d < 0` as "authored window here",
+		// while every existing consumer of GBUF_DEPTH.a - the Sketchpad depth clip
+		// (patch g), the sun/local-light visibility kernel (Glare.hlsl) - guards with
+		// `d > 0.1` and sees a negative exactly as it sees the 0 behind unflagged
+		// glass today: nothing drawn. Occlusion is inherited from the pass's own
+		// z-buffer: interior structure nearer than the window (a seat back, the canopy
+		// frame, a helmet) writes nearer POSITIVE depth and wins, so the mask is holed
+		// per pixel with no further machinery. NOT a mesh UsrFlag, deliberately:
+		// vessels rewrite their own group flags at runtime; the list is per-instance
+		// state inherited from the template, untouchable from vessel code.
+		// The one accepted loss: whatever lay BEHIND a declared pane no longer has its
+		// depth in the buffer (the pane's own value replaces it), so patch (g) geometry
+		// is no longer cut against, e.g., your own nose seen through the windscreen.
+		// (bRainGlass is computed at the TOP of the loop - it must precede the UsrFlag
+		// skips, see the note there.)
+		if (!bRainGlass &&
+		    Grp[g].MtrlIdx != SPEC_DEFAULT && Grp[g].MtrlIdx < nMtrl
 		    && Mtrl[Grp[g].MtrlIdx].Diffuse.w < 0.9f) continue;
 
+		MeshShader::ps_bools.bRainGlass = bRainGlass;
 		MeshShader::ps_bools.bOIT = (Grp[g].UsrFlag & 0x20) != 0;
 
 		if (MeshShader::ps_bools.bOIT) {

@@ -515,6 +515,105 @@ sampler EnvMapAS = sampler_state
 	AddressW = CLAMP;
 };
 
+// ============================================================================
+// ORO patch (v): BOX-PROJECTED (parallax-corrected) environment sampling.
+// A cube map stores the world as seen from ONE point; sampling it by raw
+// reflection DIRECTION paints nearby geometry as if it stood at infinity -
+// magnified and unanchored, the "zoomed in" look of any probe placed inside
+// the thing it reflects (the Atlantis payload bay was the reporting case).
+// The correction is the standard one: intersect the reflection ray with a
+// proxy BOX around the probed volume and sample the cube TOWARD THE HIT
+// POINT, so near geometry lands at the right place and scale from any eye
+// position. The box (an OBB in the vessel's own axes) and the probe position
+// arrive per probe from the _ecam config via the per-group swap in
+// D3D9Mesh::Render; gEnvBoxC.w = 0 - the default, and every probe without a
+// BOX line - bypasses the whole thing, so stock content cannot move.
+// All vectors are camera-centred world, the shaders' native space.
+// ============================================================================
+uniform extern float4 gEnvBoxC;    // xyz box centre, w: 1 = box projection on
+uniform extern float4 gEnvBoxX;    // xyz unit axis, w half-extent [m]
+uniform extern float4 gEnvBoxY;
+uniform extern float4 gEnvBoxZ;
+uniform extern float4 gEnvPrbP;    // xyz probe position
+
+// ORO patch (v) part 2: the PLANAR mirror - the mirrored-scene RT for groups a
+// vessel's _ecam config assigns to a reflection plane. Sampled at the pixel's own
+// SCREEN position (the mirrored view-projection makes a real point land exactly
+// where the main camera sees its virtual image - the wet-ground mirror's law),
+// with the pass's clip-space X flip undone here. gPlnCtl: xy = 1/screen,
+// z = enable. Alpha 0 in the RT means "nothing reflected here" and the probe
+// keeps that pixel, so planet and sky still arrive from the cube.
+uniform extern texture   gPlnMap;
+uniform extern float4    gPlnCtl;
+// ORO patch (v) 2b: the mirror PLANE's equation (N, d) in camera-centred world,
+// and gPlnCtl.w = RDIST [m]. Together they let the pixel shader re-aim the
+// planar sample along the pixel's TRUE reflected ray - the curvature warp.
+uniform extern float4    gPlnEq;
+
+// ORO patch (w): PLANET-SHINE SHADOWS - a depth map of the focus assembly along
+// the planet direction (the sun shadow-map machinery, reused). gPShnSHD:
+// x = enable, y = texel size, z = world bias [m], w = 1/depth. With x = 0 the
+// glow term below is bit-exact stock.
+uniform extern float4x4  gPShnLVP;
+uniform extern float4    gPShnSHD;
+uniform extern texture   gPShnMap;
+
+sampler PShnS = sampler_state
+{
+	Texture = <gPShnMap>;
+	MinFilter = POINT;
+	MagFilter = POINT;
+	MipFilter = NONE;
+	AddressU = CLAMP;
+	AddressV = CLAMP;
+};
+
+// Lit factor for the planet-shine term at posW (camera-centred world). The map
+// stores 1 - z/w, the sun shadow-map convention; 4-tap PCF softens the edge -
+// planet light is a huge area source, a hard edge would be a lie.
+float PShineShadow(float3 posW)
+{
+	if (gPShnSHD.x < 0.5f) return 1.0f;
+	// orthographic projection: w is exactly 1, no divide needed
+	float3 h = mul(float4(posW, 1.0f), gPShnLVP).xyz;
+	h.xy = h.xy * float2(0.5f, -0.5f) + 0.5f;
+	if (any(saturate(h) != h)) return 1.0f;
+	float pd = (1.0f - h.z) + gPShnSHD.z * gPShnSHD.w;
+	float lit = step(tex2D(PShnS, h.xy).r, pd);
+	lit += step(tex2D(PShnS, h.xy + gPShnSHD.yy).r, pd);
+	return lit * 0.5f;
+}
+
+
+sampler PlnMapS = sampler_state
+{
+	Texture = <gPlnMap>;
+	MinFilter = LINEAR;
+	MagFilter = LINEAR;
+	MipFilter = NONE;
+	AddressU = CLAMP;
+	AddressV = CLAMP;
+};
+
+float3 EnvDir(float3 posW, float3 R)
+{
+	if (gEnvBoxC.w < 0.5f) return R;
+	// into the box frame
+	float3 rp = posW - gEnvBoxC.xyz;
+	float3 rl = float3(dot(rp, gEnvBoxX.xyz), dot(rp, gEnvBoxY.xyz), dot(rp, gEnvBoxZ.xyz));
+	float3 rd = float3(dot(R,  gEnvBoxX.xyz), dot(R,  gEnvBoxY.xyz), dot(R,  gEnvBoxZ.xyz));
+	// slab test, exit distance only (the surface is inside or near the box; a
+	// zero direction component yields +-inf slabs, which IEEE handles for us)
+	float3 ext = float3(gEnvBoxX.w, gEnvBoxY.w, gEnvBoxZ.w);
+	float3 tm = max((ext - rl) / rd, (-ext - rl) / rd);
+	float  t  = max(min(tm.x, min(tm.y, tm.z)), 0.0f);
+	// the hit, re-aimed from the PROBE rather than the surface
+	float3 pp = gEnvPrbP.xyz - gEnvBoxC.xyz;
+	float3 pl = float3(dot(pp, gEnvBoxX.xyz), dot(pp, gEnvBoxY.xyz), dot(pp, gEnvBoxZ.xyz));
+	float3 dl = (rl + rd * t) - pl;
+	return normalize(dl.x * gEnvBoxX.xyz + dl.y * gEnvBoxY.xyz + dl.z * gEnvBoxZ.xyz + 1e-6f);
+}
+
 sampler EnvMapBS = sampler_state
 {
 	Texture = <gEnvMapB>;
