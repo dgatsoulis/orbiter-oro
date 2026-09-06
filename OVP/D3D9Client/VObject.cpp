@@ -300,6 +300,9 @@ void vObject::RenderSpot(LPDIRECT3DDEVICE9 dev, const VECTOR3 *ofs, float size, 
 
 	D3DXCOLOR color((float)col.x, (float)col.y, (float)col.z, 1.0f);
 
+	// ORO patch (aa): a light sprite in fog dims with the air between it and the eye.
+	{ extern float OroFogTransmittance(const D3DXVECTOR3& posW); intens *= OroFogTransmittance(vPos); }
+
 	D3D9Effect::RenderSpot((float)intens, &color, (const LPD3DXMATRIX)&W, blobtex[shape]);
 }
 

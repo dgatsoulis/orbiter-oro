@@ -858,6 +858,10 @@ bool vVessel::Render(LPDIRECT3DDEVICE9 dev, bool internalpass)
 		if (bVC && internalpass) {
 			D3D9Sun local = sunLight;
 			local.Color *= 0.5f;
+			// ORO patch (ad): the cabin at night - the Launchpad ambient fill is light that
+			// is not there. Scaled for the cockpit draw only (Scene's bracket sets it).
+			extern float g_oroVCNightNow;
+			local.Ambient *= g_oroVCNightNow;
 			meshlist[i].mesh->SetSunLight(&local);
 		}
 		else meshlist[i].mesh->SetSunLight(&sunLight);
@@ -1213,7 +1217,7 @@ void vVessel::RenderGroundShadow(LPDIRECT3DDEVICE9 dev, OBJHANDLE hPlanet, float
 		D3D9Mesh *mesh = meshlist[i].mesh;
 
 		if (meshlist[i].trans) {
-			VECTOR3 of;	
+			VECTOR3 of;
 			vessel->GetMeshOffset(i, of);
 			nrml.w += float(dotp(of, hn));	// Sift a local groung level
 			D3DXMatrixMultiply(&mProjWorldShift, meshlist[i].trans, &mProjWorld);

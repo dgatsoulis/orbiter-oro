@@ -223,6 +223,10 @@ public:
 	void			SetName(UINT idx);
 	const char *	GetName() const { return name; }
 
+	// ORO patch (h) part 4: the live reload's write path - RainGlassReload (Mesh.cpp)
+	// hands every catalogued mesh its recomputed rain-glass list by name match.
+	void			SetRainGroups(const std::vector<WORD> &g) { rainGrp = g; }
+
 	void			SetDefaultShader(WORD shader) { DefShader = shader; bMtrlModidied = true; }
 	WORD			GetDefaultShader() const { return DefShader; }
 	
@@ -320,6 +324,7 @@ public:
 	 */
 	bool			SetTexture(DWORD texidx, SURFHANDLE tex);
 	void			SetTexMixture (DWORD ntex, float mix);
+	void			AttachNightTextures();	// ORO: probe <tex>_n siblings for base structures (see Mesh.cpp)
 
 	void			RenderGroup(const GROUPREC *grp);
 	void			RenderGroup(int idx);

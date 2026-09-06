@@ -121,6 +121,9 @@ public:
 	static D3DXHANDLE	eWater;      ///< Water
 	static D3DXHANDLE	eSun;        ///< Sun
 	static D3DXHANDLE	eLights;     ///< Additional light sources
+	static D3DXHANDLE	eLclShdVP;   ///< ORO patch (z3) 2b: local-light shadow view-proj
+	static D3DXHANDLE	eLclShd;     ///< ORO patch (z3) 2b: slot (-1 = none), 1/mapsize
+	static D3DXHANDLE	eLclShmTex;  ///< ORO patch (z3) 2b: the local-light shadow map
 	static D3DXHANDLE	eKernel;
 	static D3DXHANDLE	eAtmoParams;
 
@@ -148,6 +151,20 @@ public:
 	static D3DXHANDLE	eWetDark;      ///< FLOAT ORO patch (s) part 3: wet albedo darkening, 0..2
 	static D3DXHANDLE	eWetTime;      ///< FLOAT ORO patch (s): real-time clock for the rain sparkle
 	static D3DXHANDLE	eWetGlint;     ///< FLOAT ORO patch (s) part 5: hull glint gain, 0..2
+	static D3DXHANDLE	eFogPrm;       ///< FLOAT4[6] ORO patch (aa): fog camera/layer constants
+	static D3DXHANDLE	eFogClr;       ///< FLOAT4[3] ORO patch (aa): fog colour, sun lobe, ambient lift
+	static D3DXHANDLE	eSnow;         ///< FLOAT4 ORO patch (aa): snow cover, line, 1/width
+	static D3DXHANDLE	eSceneDepth;   ///< TEXTURE ORO patch (ab): GBUF_DEPTH for the soft shadow test
+	static D3DXHANDLE	eSceneDepthPrm;///< FLOAT4 ORO patch (ab): 1/W, 1/H, tolerance base, tolerance/m
+	static D3DXHANDLE	eOroDbg;       ///< FLOAT ORO patch (ab) INSTRUMENT: ShadowDebug mode
+	static D3DXHANDLE	eCascBasis;    ///< FLOAT4[2] ORO patch (ae): the shared light basis U, V (L = -U x V in the shader)
+	static D3DXHANDLE	eCascA;        ///< FLOAT4[7] ORO patch (ae): per slot centre u, v, near depth, 1/range - focus, cascades 1-3, three hull boxes
+	static D3DXHANDLE	eCascTx;       ///< FLOAT4[2] ORO patch (ae): those seven slots' texels (m), four to a register
+	static D3DXHANDLE	eCascSplit;    ///< FLOAT4 ORO patch (ae): split distances
+	static D3DXHANDLE	eCascAtlas;    ///< FLOAT4 ORO patch (ae): 1/atlas, slot scale, ON
+	static D3DXHANDLE	eCascMap;      ///< TEXTURE ORO patch (ae): the atlas
+	static D3DXHANDLE	eBaseGlow;     ///< FLOAT ORO patch (ac): base night-light glow gain, 1 = stock
+	static D3DXHANDLE	eBaseHalo;     ///< FLOAT ORO patch (ac) part 2: the fog aureole gain, 1 = designed
 	static D3DXHANDLE	eWetReflTex;   ///< TEXTURE ORO patch (s) part 6: the planar mirror
 	static D3DXHANDLE	eWetReflPrm;   ///< FLOAT4 ORO patch (s) part 6: 1/W, 1/H, gain, live
 	static D3DXHANDLE	eWetSwimPrm;   ///< FLOAT4 ORO patch (s) part 6: swim amp scale, rate scale, 0, 0

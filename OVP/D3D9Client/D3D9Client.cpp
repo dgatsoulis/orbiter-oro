@@ -1781,7 +1781,11 @@ LRESULT D3D9Client::RenderWndProc (HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
 
 			if (DebugControls::IsActive() || bPckVsl || (bShift && bCtrl)) {
 				pick = GetScene()->PickScene(xpos, ypos);
-				if (bPckVsl) {
+				// ORO patch (h) part 3: a click that hits NOTHING (the sky through a
+				// cockpit window) leaves pick.vObj NULL, and this block dereferenced
+				// it unchecked - a stock crash armed the moment any addon enables
+				// GENERICPROC_PICK_VESSEL. A miss makes no call.
+				if (bPckVsl && pick.vObj && pick.pMesh) {
 					gcCore::PickData out;
 					out.hVessel = pick.vObj->GetObjectA();
 					out.mesh = MESHHANDLE(pick.pMesh);

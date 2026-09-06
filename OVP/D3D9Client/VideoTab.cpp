@@ -478,6 +478,25 @@ void VideoTab::UpdateConfigData()
 // ***************************************************************************************************
 
 
+// ORO patch (ae) round 9: the Shadows box's greying rules - a control that cannot do
+// anything in the chosen mode is worse than no control (the ORO panel's own law).
+// Map size and filter need vessel self-shadows on; the cascade rows need "Cascaded
+// (ORO)"; local light shadows need local lights on.
+static void OroUpdateShadowControls(HWND hWnd)
+{
+	const int mapping = (int)SendDlgItemMessage(hWnd, IDC_SELFSHADOWS, CB_GETCURSEL, 0, 0);
+	const int terrain = (int)SendDlgItemMessage(hWnd, IDC_TERRAIN, CB_GETCURSEL, 0, 0);
+	const int lights  = (int)SendDlgItemMessage(hWnd, IDC_LIGHTCONFIG, CB_GETCURSEL, 0, 0);
+	const BOOL vessel = (mapping > 0), casc = (terrain == 3), lcl = (lights > 0);
+	EnableWindow(GetDlgItem(hWnd, IDC_SHADOWFILTER), vessel);
+	EnableWindow(GetDlgItem(hWnd, IDC_SHDMAPSIZE), vessel);
+	EnableWindow(GetDlgItem(hWnd, IDC_CASCSIZE), casc);
+	EnableWindow(GetDlgItem(hWnd, IDC_CASCFAR), casc);
+	EnableWindow(GetDlgItem(hWnd, IDC_CASCFAR_DSP), casc);
+	EnableWindow(GetDlgItem(hWnd, IDC_CASCSOFT), casc);
+	EnableWindow(GetDlgItem(hWnd, IDC_LCLSHADOWS), lcl);
+}
+
 INT_PTR CALLBACK VideoTab::SetupDlgProcWrp(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
 	static class VideoTab *VTab = NULL;
@@ -512,11 +531,22 @@ INT_PTR CALLBACK VideoTab::SetupDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
 				sprintf_s(lbl,32,"%1.0f%%",float(pos));
 				SetWindowTextA(GetDlgItem(hWnd, IDC_SEPA_DSP), lbl);
 			}
+			if (HWND(lParam)==GetDlgItem(hWnd, IDC_CASCFAR)) {			// ORO patch (ae) round 9
+				sprintf_s(lbl,32,"%d km",(int)pos);
+				SetWindowTextA(GetDlgItem(hWnd, IDC_CASCFAR_DSP), lbl);
+			}
 		}
 		return false;
 	}
 
 	switch (LOWORD(wParam)) {
+
+		// ORO patch (ae) round 9: the Shadows box greys its dependants as the modes change
+		case IDC_SELFSHADOWS:
+		case IDC_TERRAIN:
+		case IDC_LIGHTCONFIG:
+			if (HIWORD(wParam) == CBN_SELCHANGE) OroUpdateShadowControls(hWnd);
+			break;
 
 		case IDC_MESH_DEBUGGER:
 			MessageBoxA(hWnd,"You must restart launchpad for changes to take effect","Notification",MB_OK);
@@ -738,6 +768,21 @@ void VideoTab::InitSetupDialog(HWND hWnd)
 	SendDlgItemMessageA(hWnd, IDC_TERRAIN, CB_ADDSTRING, 0, (LPARAM)"None");
 	SendDlgItemMessageA(hWnd, IDC_TERRAIN, CB_ADDSTRING, 0, (LPARAM)"Stencil");
 	SendDlgItemMessageA(hWnd, IDC_TERRAIN, CB_ADDSTRING, 0, (LPARAM)"Projected");
+	SendDlgItemMessageA(hWnd, IDC_TERRAIN, CB_ADDSTRING, 0, (LPARAM)"Cascaded (ORO)");	// ORO patch (ae)
+
+	// ORO patch (ae) round 9: the rest of the Shadows box. Sizes are fixed lists that
+	// SNAP on load (a hand-edited key that is not in a combo's list writes back CB_ERR on
+	// the next OK - the stock filter trap); the reach is a SLIDER for the same reason.
+	SendDlgItemMessage(hWnd, IDC_SHDMAPSIZE, CB_RESETCONTENT, 0, 0);
+	SendDlgItemMessageA(hWnd, IDC_SHDMAPSIZE, CB_ADDSTRING, 0, (LPARAM)"1024");
+	SendDlgItemMessageA(hWnd, IDC_SHDMAPSIZE, CB_ADDSTRING, 0, (LPARAM)"2048");
+	SendDlgItemMessageA(hWnd, IDC_SHDMAPSIZE, CB_ADDSTRING, 0, (LPARAM)"4096");
+	SendDlgItemMessage(hWnd, IDC_CASCSIZE, CB_RESETCONTENT, 0, 0);
+	SendDlgItemMessageA(hWnd, IDC_CASCSIZE, CB_ADDSTRING, 0, (LPARAM)"1024  (48 MB)");
+	SendDlgItemMessageA(hWnd, IDC_CASCSIZE, CB_ADDSTRING, 0, (LPARAM)"2048  (192 MB)");
+	SendDlgItemMessageA(hWnd, IDC_CASCSIZE, CB_ADDSTRING, 0, (LPARAM)"4096  (768 MB)");
+	SendDlgItemMessage(hWnd, IDC_CASCFAR, TBM_SETRANGEMAX, 1, 60);		// km
+	SendDlgItemMessage(hWnd, IDC_CASCFAR, TBM_SETRANGEMIN, 1, 5);
 
 	SendDlgItemMessage(hWnd, IDC_MESHRES, CB_RESETCONTENT, 0, 0);
 	SendDlgItemMessageA(hWnd, IDC_MESHRES, CB_ADDSTRING, 0, (LPARAM)"16");
@@ -827,6 +872,18 @@ void VideoTab::InitSetupDialog(HWND hWnd)
 	SendDlgItemMessage(hWnd, IDC_SELFSHADOWS, CB_SETCURSEL, Config->ShadowMapMode, 0);
 	SendDlgItemMessage(hWnd, IDC_SHADOWFILTER, CB_SETCURSEL, Config->ShadowFilter, 0);
 	SendDlgItemMessage(hWnd, IDC_TERRAIN, CB_SETCURSEL, Config->TerrainShadowing, 0);
+	// ORO patch (ae) round 9: the Shadows box's new rows (sizes snap to their lists)
+	SendDlgItemMessage(hWnd, IDC_SHDMAPSIZE, CB_SETCURSEL, (Config->ShadowMapSize <= 1024) ? 0 : (Config->ShadowMapSize <= 2048) ? 1 : 2, 0);
+	SendDlgItemMessage(hWnd, IDC_CASCSIZE, CB_SETCURSEL, (Config->ShadowCascadeSize <= 1024) ? 0 : (Config->ShadowCascadeSize <= 2048) ? 1 : 2, 0);
+	{
+		const int km = max(5, min(60, (int)(Config->ShadowCascadeFar / 1000.0 + 0.5)));
+		char lbl[32]; sprintf_s(lbl, 32, "%d km", km);
+		SendDlgItemMessage(hWnd, IDC_CASCFAR, TBM_SETPOS, 1, (LPARAM)km);
+		SetWindowTextA(GetDlgItem(hWnd, IDC_CASCFAR_DSP), lbl);
+	}
+	SendDlgItemMessage(hWnd, IDC_LCLSHADOWS, BM_SETCHECK, Config->LocalLightShadows == 1, 0);
+	SendDlgItemMessage(hWnd, IDC_CASCSOFT, BM_SETCHECK, Config->ShadowCascadeSoft == 1, 0);
+	OroUpdateShadowControls(hWnd);
 	SendDlgItemMessage(hWnd, IDC_PRTLIGHT, CB_SETCURSEL, Config->ParticleLight, 0);	// ORO patch (x)
 	SendDlgItemMessage(hWnd, IDC_PRTSHADOW, TBM_SETPOS, 1, (LPARAM)(Config->ParticleShadow * 100.0 + 0.5));	// ORO patch (x)
 	SendDlgItemMessage(hWnd, IDC_PRTLEAD,  TBM_SETPOS, 1, (LPARAM)(Config->ParticleTintLead * 500.0 + 0.5));			// ORO patch (x): 0..0.20 -> 0..100
@@ -905,6 +962,12 @@ void VideoTab::SaveSetupState(HWND hWnd)
 	Config->ShadowMapMode = (int)SendDlgItemMessage(hWnd, IDC_SELFSHADOWS, CB_GETCURSEL, 0, 0);
 	Config->ShadowFilter  = (int)SendDlgItemMessage(hWnd, IDC_SHADOWFILTER, CB_GETCURSEL, 0, 0);
 	Config->TerrainShadowing = (int)SendDlgItemMessage(hWnd, IDC_TERRAIN, CB_GETCURSEL, 0, 0);
+	// ORO patch (ae) round 9: the Shadows box's new rows
+	Config->ShadowMapSize      = 1024 << max(0, min(2, (int)SendDlgItemMessage(hWnd, IDC_SHDMAPSIZE, CB_GETCURSEL, 0, 0)));
+	Config->ShadowCascadeSize  = 1024 << max(0, min(2, (int)SendDlgItemMessage(hWnd, IDC_CASCSIZE, CB_GETCURSEL, 0, 0)));
+	Config->ShadowCascadeFar   = 1000.0 * max(5, min(60, (int)SendDlgItemMessage(hWnd, IDC_CASCFAR, TBM_GETPOS, 0, 0)));
+	Config->LocalLightShadows  = (int)SendDlgItemMessage(hWnd, IDC_LCLSHADOWS, BM_GETCHECK, 0, 0);
+	Config->ShadowCascadeSoft  = (int)SendDlgItemMessage(hWnd, IDC_CASCSOFT, BM_GETCHECK, 0, 0);
 	Config->gcGUIMode	  = (int)SendDlgItemMessage(hWnd, IDC_GUIMODE, CB_GETCURSEL, 0, 0);
 	Config->MeshRes		  = int(SendDlgItemMessage(hWnd, IDC_MESHRES, CB_GETCURSEL, 0, 0));
 	Config->MaxTiles	  = int(SendDlgItemMessage(hWnd, IDC_TILECOUNT, CB_GETCURSEL, 0, 0));

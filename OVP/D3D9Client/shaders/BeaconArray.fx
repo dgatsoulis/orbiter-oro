@@ -53,9 +53,20 @@ BeaconVS BeaconArrayVS(BAVERTEX vrt)
 
 	if (gTime<vrt.data[2] || gTime>vrt.data[3]) disp = 0.0f;
 
-	outVS.colr    = float4(vrt.colr.rgb, min(1, vrt.colr.a * disp * att1 * 1.2f));
-	outVS.size    = (5.5f + vrt.data[0] * gPointScale / dist) * disp;
-	outVS.haze    = clamp(fog*1.8f, 0.3f, 1.8f);
+	// ORO patch (aa): a runway light dims through the fog between it and the eye.
+	float fogT = 1.0f, fogSun = 1.0f; float3 cFog = 0;
+	OroFog(posW, -gSun.Dir, fogT, fogSun, cFog);
+	// ORO patch (ac) part 2: THE HALO (his reference: runway lights in fog). The direct
+	// beam dims by the transmittance T, but the air round the lamp scatters its strong
+	// near field toward the eye: a soft aureole that GROWS with the optical depth. Size
+	// and softness ride (1 - T) x the Lights halo gain; the alpha fades as sqrt(T)
+	// rather than T while a halo is wanted, because what you see is the aureole, lit by
+	// the lamp's near field, not the beam. Halo gain 0 = the plain (aa) attenuation.
+	float haloK = saturate((1.0f - fogT) * gBaseHalo);
+	float aT    = lerp(fogT, sqrt(fogT), saturate(gBaseHalo));
+	outVS.colr    = float4(vrt.colr.rgb * gBaseGlow, min(1, vrt.colr.a * disp * att1 * 1.2f) * aT);   // ORO patch (ac): the glow
+	outVS.size    = (5.5f + vrt.data[0] * gPointScale / dist) * disp * (1.0f + 5.0f * haloK);
+	outVS.haze    = lerp(clamp(fog*1.8f, 0.3f, 1.8f), 0.30f, haloK);   // lower exponent = softer, wider disc
 
 	return outVS;
 }
@@ -80,7 +91,11 @@ technique BeaconArrayTech
 		BlendOp = Add;
 		SrcBlend = SrcAlpha;
 		DestBlend = InvSrcAlpha;
-		ZEnable = false;
+		// ORO patch (z): runway lights obey the depth buffer - the other half
+		// of the Mesh.fx BaseTileTech fix. Depth-blind beacons shone through a
+		// mountain standing between camera and runway. ZWrite stays off: a
+		// light is a sprite, not an occluder.
+		ZEnable = true;
 		ZWriteEnable = false;
 	}
 }

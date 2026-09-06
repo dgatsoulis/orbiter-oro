@@ -14,6 +14,7 @@ struct ParticleVS
 	float4 posH     : POSITION0;
 	float2 tex0     : TEXCOORD0;
 	float3 light    : TEXCOORD1;	// ORO patch (x): RGB (was a scalar) - the sun share carries a hue
+	float4 fog      : TEXCOORD2;	// ORO patch (aa): rgb = the fog colour, a = transmittance
 };
 
 ParticleVS ParticleDiffuseVS(NTVERTEX vrt)
@@ -31,6 +32,8 @@ ParticleVS ParticleDiffuseVS(NTVERTEX vrt)
 	// exactly (1,1,1), so the daytime look is bit-identical to stock.
 	outVS.light   = vrt.nrmL.xyz; // stock: 1.0f; // saturate(dot(-gSun.Dir, vrt.nrmL) * 2.0f);
 	outVS.posH    = mul(float4(vrt.posL, 1.0f), gVP);
+	// ORO patch (aa): the fog, per particle corner (posL is camera-relative world space)
+	{ float T, sA; float3 cF; OroFog(vrt.posL, -gSun.Dir, T, sA, cF); outVS.fog = float4(cF, T); }
 	return outVS;
 }
 
@@ -39,6 +42,7 @@ ParticleVS ParticleEmissiveVS(EPVERTEX vrt)
 	ParticleVS outVS = (ParticleVS)0;
 	outVS.tex0   = vrt.tex0;
 	outVS.posH   = mul(float4(vrt.posL, 1.0f), gVP);
+	{ float T, sA; float3 cF; OroFog(vrt.posL, -gSun.Dir, T, sA, cF); outVS.fog = float4(cF, T); }   // ORO patch (aa)
 	return outVS;
 }
 
@@ -54,19 +58,19 @@ ParticleVS ParticleEmissiveVS(EPVERTEX vrt)
 float4 ParticleDiffusePS(ParticleVS frg) : COLOR
 {
 	float4 color = tex2D(WrapS, frg.tex0);
-	return float4(color.rgb*frg.light, color.a*gMix);
+	return float4(lerp(color.rgb*frg.light, frg.fog.rgb, 1.0f - frg.fog.a), color.a*gMix);   // ORO patch (aa)
 }
 
 float4 ParticleEmissivePS(ParticleVS frg) : COLOR
 {
 	float4 color = tex2D(WrapS, frg.tex0);
-	return float4(color.rgb*gColor.rgb, color.a*gMix);
+	return float4(lerp(color.rgb*gColor.rgb, frg.fog.rgb, 1.0f - frg.fog.a), color.a*gMix);   // ORO patch (aa)
 }
 
 float4 ParticleShadowPS(ParticleVS frg) : COLOR
 {
 	float4 color = tex2D(WrapS, frg.tex0);
-	return float4(0,0,0,color.a*gMix*2.0);
+	return float4(0,0,0,color.a*gMix*2.0*frg.fog.a);   // ORO patch (aa): a shadow through fog is fainter
 }
 
 

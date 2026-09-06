@@ -98,7 +98,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 
 
 	// Sample emission map. (Note: Emissive materials and textures need to go different stages, material is added to light)
-	if (gCfg.Emis) cEmis = tex2D(EmisS, frg.tex0.xy).rgb;
+	if (gCfg.Emis) cEmis = tex2D(EmisS, frg.tex0.xy).rgb * gBaseGlow;   // ORO patch (ac): 1 on vessels
 	else		   cEmis = 0;
 
 
@@ -111,7 +111,10 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 	// ORO patch (s) part 2: overcast - the directional sun collapses, the ambient lifts
 	// (below, at the diffuse bake). Shadow-map shadows fade automatically with this, since
 	// they only modulate the sun term (the patch-(p) finding, working in our favour here).
-	float3 cSun = saturate(gSun.Color) * (1.0f - gStorm);
+	// ORO patch (aa): the fog, up front - the direct sun through the column above the pixel.
+	float  fogT = 1.0f, fogSun = 1.0f; float3 cFog = 0;
+	OroFog(-frg.camW, -gSun.Dir, fogT, fogSun, cFog);
+	float3 cSun = saturate(gSun.Color) * (1.0f - gStorm) * fogSun;
 
 
 	// ----------------------------------------------------------------------
@@ -236,13 +239,19 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 	// ----------------------------------------------------------------------
 
 	float fAmbShd = 1.0f;         // ORO patch (p): ambient survival in shadow
-#if SHDMAP > 0
 	{
-		float fShd = smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
+		// ORO patch (ae): the cascade term lives OUTSIDE the SHDMAP block, so a hull is
+		// shadowed by the world with Vessel mapping None (the atlas needs no per-vessel map)
+		float fShd = 1.0f;
+#if SHDMAP > 0
+		fShd = smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
+#endif
+#if defined(_CASCADE)
+		fShd = min(fShd, OroCascadeShadow(-frg.camW, nrmW, -gSun.Dir));   // ORO patch (ae): the world's shadows on the hull
+#endif
 		cSun *= fShd;
 		fAmbShd = lerp(1.0f, fShd, gVCShdDepth);
 	}
-#endif
 
 
 	// ----------------------------------------------------------------------
@@ -332,7 +341,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 	cDiffLocal += gAtmColor.rgb * (max(0, angl*gGlowConst) * PShineShadow(-frg.camW));	// ORO patch (w)
 
 	// Bake material props and lights together
-	float3 diffBaked = Light_fx(gMtrl.diffuse.rgb * (dLN * cSun + cDiffLocal) + gMtrl.emissive.rgb + gMtrl.ambient.rgb*gSun.Ambient*(1.0f + gStorm * 1.8f)*fAmbShd);
+	float3 diffBaked = Light_fx(gMtrl.diffuse.rgb * (dLN * cSun + cDiffLocal) + gMtrl.emissive.rgb + gMtrl.ambient.rgb*gSun.Ambient*(1.0f + gStorm * 1.8f)*(1.0f + gFogLift * (1.0f - fogSun))*fAmbShd);
 
 #if LMODE > 0
 	cSun = Light_fx(cSun + cSpecLocal);	// Add local light sources
@@ -343,6 +352,9 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 	if (gNoColor) cDiff.rgb = 1;
 
 	// ------------------------------------------------------------------------
+	// ORO patch (aa): SNOW COVER on the up-facing hull - dormant at gSnow.x 0
+	[branch] if (gSnow.x > 0.0f)
+		cDiff.rgb = lerp(cDiff.rgb, ORO_SNOW_ALBEDO, OroSnowMask(nrmW, gFogCam.xyz, 1e9f, frg.tex0.xy * 24.0f));
 	float3 cAlbedo = cDiff.rgb;			// ORO patch (r): texture colour before lighting
 	cDiff.rgb *= diffBaked;				// Lit the texture
 	// ORO patch (r): THE EMISSIVE OVERDRIVE.
@@ -456,6 +468,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 
 	cDiff.rgb *= gSun.Transmission;
 	cDiff.rgb += gSun.Inscatter;
+	cDiff.rgb = lerp(cDiff.rgb, cFog, 1.0f - fogT);   // ORO patch (aa): the fog goes on last
 
 	return cDiff;
 }
@@ -514,6 +527,13 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
 
 	float3 cEmis;
 	float4 cDiff;
+	// ORO patch (aa): THE FAST PATH SITS AT THE ps_3_0 TEMP-REGISTER CEILING (patch (w)
+	// found it there first: X4505). Five fog temporaries declared here and kept alive
+	// through the lighting peak overflow it, so this path evaluates the fog at the END
+	// (short live range) and attenuates its sun by the CAMERA's transmittance - a
+	// uniform, gFogSunCam, costing no registers. A hull metres from the camera at the
+	// same height sees no difference; a structure poking out of the fog top does, and
+	// that is the accepted price of this path's cheapness.
 	float3 cDiffLocal;
 	float3 cSpecLocal;
 
@@ -531,12 +551,12 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
 	else {
 
 		// Sample emission map. (Note: Emissive materials and textures need to go different stages, material is added to light)
-		if (gCfg.Emis) cEmis = tex2D(EmisS, frg.tex0.xy).rgb;
+		if (gCfg.Emis) cEmis = tex2D(EmisS, frg.tex0.xy).rgb * gBaseGlow;   // ORO patch (ac): 1 on vessels
 		else		   cEmis = 0;
 
 		float3 nrmW  = normalize(frg.nrmW);
 		float4 cSpec = gMtrl.specular.rgba;
-		float3 cSun  = saturate(gSun.Color) * (1.0f - gStorm);   // ORO patch (s) part 2
+		float3 cSun  = saturate(gSun.Color) * (1.0f - gStorm) * gFogSunCam;   // ORO patch (s) part 2 + (aa)
 		float  dLN   = saturate(-dot(gSun.Dir, nrmW));
 
 		// ORO patch (s): A WET HULL, fast path. ⚠️ This is the path a mesh with no
@@ -556,8 +576,13 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
 		// Add vessel self-shadows
 		// ----------------------------------------------------------------------
 
+		// ORO patch (p) FIX (2026-09-06): declared OUTSIDE the block. With Vessel mapping
+		// None the client compiles SHDMAP as 0, the block vanishes, and the two reads of
+		// fShadow below were X3004 - the whole effect refused since patch (p) landed.
+		// (FAST carries no cascade term: it sits at the ps_3_0 temp ceiling.)
+		float fShadow = 1.0f;
 #if SHDMAP > 0
-		float fShadow = smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
+		fShadow = smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
 		dLN *= fShadow;
 #endif
 
@@ -578,8 +603,11 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
 		// shine shadow overflows it (X4505). FAST keeps the stock unshadowed glow.
 		cDiffLocal += gAtmColor.rgb * max(0, angl*gGlowConst);
 
+		// ORO patch (aa): SNOW COVER (fast path) - dormant at gSnow.x 0
+		[branch] if (gSnow.x > 0.0f)
+			cDiff.rgb = lerp(cDiff.rgb, ORO_SNOW_ALBEDO, OroSnowMask(nrmW, gFogCam.xyz, 1e9f, frg.tex0.xy * 24.0f));
 		// ORO patch (p): fShadow is already in hand here (it scaled dLN above).
-		cDiff.rgb *= saturate( (gMtrl.diffuse.rgb*(dLN * cSun + cDiffLocal)) + (gMtrl.ambient.rgb*gSun.Ambient*(1.0f + gStorm * 1.8f)*lerp(1.0f, fShadow, gVCShdDepth)) + gMtrl.emissive.rgb );
+		cDiff.rgb *= saturate( (gMtrl.diffuse.rgb*(dLN * cSun + cDiffLocal)) + (gMtrl.ambient.rgb*gSun.Ambient*(1.0f + gStorm * 1.8f)*(1.0f + gFogLift * (1.0f - gFogSunCam))*lerp(1.0f, fShadow, gVCShdDepth)) + gMtrl.emissive.rgb );
 
 		float3 CamD = normalize(frg.camW);
 		float3 HlfW = normalize(CamD - gSun.Dir);
@@ -615,6 +643,11 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
 
 	cDiff.rgb *= gSun.Transmission;
 	cDiff.rgb += gSun.Inscatter;
+	{	// ORO patch (aa): the fog goes on last - evaluated HERE on the fast path (see the note at its head)
+		float fogT, fogSun; float3 cFog;
+		OroFog(-frg.camW, -gSun.Dir, fogT, fogSun, cFog);
+		cDiff.rgb = lerp(cDiff.rgb, cFog, 1.0f - fogT);
+	}
 
 	return cDiff;
 }

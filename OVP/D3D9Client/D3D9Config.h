@@ -70,7 +70,14 @@ public:
 	int ShadowMapMode;				///< Shadow Mapping Mode
 	int ShadowFilter;				///< Shadow Mapping Filter
 	int ShadowMapSize;				///< Shadow Map size
-	int TerrainShadowing;			///< Terrain Shadowing mode (0=None, 1=Stencil, 2=Projected, default=1)
+	int TerrainShadowing;			///< Terrain Shadowing mode (0=None, 1=Stencil, 2=Projected, 3=Cascaded (ORO patch ae), default=1)
+	int LocalLightShadows;			///< ORO patch (z3): shadow map for the strongest local SPOT light, terrain receiver (0=off/stock, 1=on, default=1)
+	double ShadowDepthTol;			///< ORO patch (ab): stencil ground-shadow soft depth test, base tolerance [m] (default 1)
+	double ShadowDepthTolK;			///< ORO patch (ab): ...plus this per metre of distance (default 0.001)
+	int ShadowDebug;				///< ORO patch (ab)/(ae) INSTRUMENT: 0 off; 1 colour the stencil sheets by the depth test's verdict; 2 by the signed depth difference; 3 dump the cascade atlas once; 4 = 3 + colour every receiver by the cascade slot it reads. All log once a second.
+	int ShadowCascadeSize;			///< ORO patch (ae): one cascade's map size; the atlas is 3x2 of these (512..4096, default 2048; 4096 = 768 MB and 16384-wide texture caps)
+	double ShadowCascadeFar;		///< ORO patch (ae): the far cascade's reach in metres (1000..60000, default 30000)
+	int ShadowCascadeSoft;			///< ORO patch (ae): 1 = the coarse cascades take a three-texel tent (soft far shadows), 0 = bilinear everywhere (default 1)
 	int ParticleLight;				///< ORO patch (x): DIFFUSE particle sun lighting (0=Off/stock always-lit, 1=Brightness only, 2=Brightness+colour, default=2)
 	double ParticleShadow;			///< ORO patch (x): DIFFUSE particle ground-shadow strength 0..1 (0=no shadow, 1=stock, default=1)
 	double ParticleTintLead;		///< ORO patch (x): dawn-hue lead in sin-elevation, 0..0.20 (the smoke reads the sun this much HIGHER than it is, default=0.10)

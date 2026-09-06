@@ -334,6 +334,8 @@ void HazeManager2::RenderSky(VECTOR3 cpos, VECTOR3 cdir, double rad, double apr)
 	pDome->SetTexture("tNoise", pNoise, IPF_POINT | IPF_WRAP);
 	pDome->SetPSConstants("Const", vp->GetScatterConst(), sizeof(ConstParams));
 	pDome->SetVSConstants("Const", vp->GetScatterConst(), sizeof(ConstParams));
+	// ORO patch (aa): fog on the sky dome - the horizon and the sun disc go with it.
+	{ extern void OroFogPushPS(ShaderClass* pShader); OroFogPushPS(pDome); }
 	pDome->UpdateTextures();
 
 	pDev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);

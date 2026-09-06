@@ -68,6 +68,9 @@ D3DXHANDLE D3D9Effect::eTune = 0;
 D3DXHANDLE D3D9Effect::eSun = 0;
 D3DXHANDLE D3D9Effect::eNight = 0;
 D3DXHANDLE D3D9Effect::eLights = 0;		// Additional light sources
+D3DXHANDLE D3D9Effect::eLclShdVP = 0;	// ORO patch (z3) 2b: local-light shadow view-proj
+D3DXHANDLE D3D9Effect::eLclShd = 0;		// ORO patch (z3) 2b: slot + 1/mapsize
+D3DXHANDLE D3D9Effect::eLclShmTex = 0;	// ORO patch (z3) 2b: the local-light shadow map
 
 D3DXHANDLE D3D9Effect::eTex0 = 0;		// Primary texture
 D3DXHANDLE D3D9Effect::eTex1 = 0;		// Secondary texture
@@ -101,6 +104,20 @@ D3DXHANDLE D3D9Effect::eStorm = 0;	// FLOAT ORO patch (s) part 2
 D3DXHANDLE D3D9Effect::eWetDark = 0;	// FLOAT ORO patch (s) part 3
 D3DXHANDLE D3D9Effect::eWetTime = 0;	// FLOAT ORO patch (s): sparkle clock
 D3DXHANDLE D3D9Effect::eWetGlint = 0;	// FLOAT ORO patch (s) part 5
+D3DXHANDLE D3D9Effect::eFogPrm = 0;	// FLOAT4[6] ORO patch (aa)
+D3DXHANDLE D3D9Effect::eFogClr = 0;	// FLOAT4[3] ORO patch (aa)
+D3DXHANDLE D3D9Effect::eSnow = 0;	// FLOAT4 ORO patch (aa)
+D3DXHANDLE D3D9Effect::eSceneDepth = 0;	// TEXTURE ORO patch (ab)
+D3DXHANDLE D3D9Effect::eSceneDepthPrm = 0;	// FLOAT4 ORO patch (ab)
+D3DXHANDLE D3D9Effect::eOroDbg = 0;	// FLOAT ORO patch (ab) instrument
+D3DXHANDLE D3D9Effect::eCascBasis = 0;	// ORO patch (ae)
+D3DXHANDLE D3D9Effect::eCascA = 0;	// ORO patch (ae)
+D3DXHANDLE D3D9Effect::eCascTx = 0;	// ORO patch (ae)
+D3DXHANDLE D3D9Effect::eCascSplit = 0;	// ORO patch (ae)
+D3DXHANDLE D3D9Effect::eCascAtlas = 0;	// ORO patch (ae)
+D3DXHANDLE D3D9Effect::eCascMap = 0;	// ORO patch (ae)
+D3DXHANDLE D3D9Effect::eBaseGlow = 0;	// FLOAT ORO patch (ac)
+D3DXHANDLE D3D9Effect::eBaseHalo = 0;	// FLOAT ORO patch (ac) part 2
 D3DXHANDLE D3D9Effect::eWetReflTex = 0;	// TEXTURE ORO patch (s) part 6
 D3DXHANDLE D3D9Effect::eWetReflPrm = 0;	// FLOAT4 ORO patch (s) part 6
 D3DXHANDLE D3D9Effect::eWetSwimPrm = 0;	// FLOAT4 ORO patch (s) part 6: swim scales
@@ -358,6 +375,7 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
 	if (Config->EnvMapMode) macro[m++].Name = "_ENVMAP"; 
 	if (Config->PostProcess == PP_DEFAULT) macro[m++].Name = "_LIGHTGLOW";
 	if (Config->bIrradiance && Config->EnvMapMode) macro[m++].Name = "_IRRADIANCE";
+	if (Config->TerrainShadowing == 3) macro[m++].Name = "_CASCADE";	// ORO patch (ae): the cascade lookups exist in mode 3 only
 	
 	
 	HR(D3DXCreateEffectFromFileA(pDev, name, macro, 0, D3DXSHADER_NO_PRESHADER|D3DXSHADER_PREFER_FLOW_CONTROL, 0, &FX, &errors));
@@ -448,6 +466,9 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
 	// General parameters -------------------------------------------------- 
 	eSpecularMode = FX->GetParameterByName(0,"gSpecMode");
 	eLights		  = FX->GetParameterByName(0,"gLights");
+	eLclShdVP	  = FX->GetParameterByName(0,"gLclShdVP");	// ORO patch (z3) 2b
+	eLclShd		  = FX->GetParameterByName(0,"gLclShd");	// ORO patch (z3) 2b
+	eLclShmTex	  = FX->GetParameterByName(0,"gLclShmTex");	// ORO patch (z3) 2b
 	eColor		  = FX->GetParameterByName(0,"gColor");
 	eDistScale    = FX->GetParameterByName(0,"gDistScale");
 	eProxySize    = FX->GetParameterByName(0,"gProxySize");
@@ -468,6 +489,20 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
 	eWetReflPrm   = FX->GetParameterByName(0,"gWetReflPrm");
 	eWetSwimPrm   = FX->GetParameterByName(0,"gWetSwimPrm");
 	eWetGrainPrm  = FX->GetParameterByName(0,"gWetGrainPrm");
+	eFogPrm       = FX->GetParameterByName(0,"gFogPrm");
+	eFogClr       = FX->GetParameterByName(0,"gFogClr");
+	eSnow         = FX->GetParameterByName(0,"gSnow");
+	eSceneDepth   = FX->GetParameterByName(0,"gSceneDepth");
+	eSceneDepthPrm= FX->GetParameterByName(0,"gSceneDepthPrm");
+	eOroDbg       = FX->GetParameterByName(0,"gOroDbg");
+	eCascBasis    = FX->GetParameterByName(0,"gCascBasis");	// ORO patch (ae)
+	eCascA        = FX->GetParameterByName(0,"gCascA");
+	eCascTx       = FX->GetParameterByName(0,"gCascTx");
+	eCascSplit    = FX->GetParameterByName(0,"gCascSplit");
+	eCascAtlas    = FX->GetParameterByName(0,"gCascAtlas");
+	eCascMap      = FX->GetParameterByName(0,"gCascMap");
+	eBaseGlow     = FX->GetParameterByName(0,"gBaseGlow");
+	eBaseHalo     = FX->GetParameterByName(0,"gBaseHalo");
 	eTime		  = FX->GetParameterByName(0,"gTime");
 	eMtrlAlpha	  = FX->GetParameterByName(0,"gMtrlAlpha");
 	eGlowConst    = FX->GetParameterByName(0,"gGlowConst");
@@ -816,6 +851,14 @@ void D3D9Effect::RenderExhaust(const LPD3DXMATRIX pW, VECTOR3 &cdir, EXHAUSTSPEC
 
 	VECTOR3 edir = -(*es->ldir);
 	VECTOR3 ref =  (*es->lpos) - (*es->ldir)*es->lofs;
+	// ORO patch (aa): a billboard drawn from the CPU with one alpha takes the fog once,
+	// at its reference point (the shaders do it per pixel).
+	{
+		extern float OroFogTransmittance(const D3DXVECTOR3& posW);
+		D3DXVECTOR3 rv((float)ref.x, (float)ref.y, (float)ref.z), rw;
+		D3DXVec3TransformCoord(&rw, &rv, pW);
+		alpha *= OroFogTransmittance(rw);
+	}
 
 	const float flarescale = 7.0;
 	VECTOR3 sdir = crossp(cdir, edir); normalise(sdir);

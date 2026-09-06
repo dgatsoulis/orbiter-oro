@@ -153,14 +153,18 @@ vBase::vBase (OBJHANDLE _hObj, const Scene *scene, vPlanet *_vP): vObject (_hObj
 	DWORD nsbs, nsas;
 	gc->GetBaseStructures (_hObj, &sbs, &nsbs, &sas, &nsas);
 
+	// ORO patch: complete the <tex>_n night-texture pair for MESH base objects
+	// (and the RUNWAY surface) - the core wires the night layer only for the
+	// generic object types, so MESH blocks arrived with it empty and the
+	// day/night switch below had nothing to flip. See D3D9Mesh::AttachNightTextures.
 	if (nstructure_bs = nsbs) {
 		structure_bs = new D3D9Mesh*[nsbs];
-		for (i = 0; i < nsbs; i++) structure_bs[i] = new D3D9Mesh(sbs[i]);
+		for (i = 0; i < nsbs; i++) { structure_bs[i] = new D3D9Mesh(sbs[i]); structure_bs[i]->AttachNightTextures(); }
 	}
 
 	if (nstructure_as = nsas) {
 		structure_as = new D3D9Mesh*[nsas];
-		for (i = 0; i < nsas; i++) structure_as[i] = new D3D9Mesh(sas[i]);
+		for (i = 0; i < nsas; i++) { structure_as[i] = new D3D9Mesh(sas[i]); structure_as[i]->AttachNightTextures(); }
 	}
 
 	lights = false;
@@ -365,7 +369,14 @@ bool vBase::Update (bool bMainScene)
 		oapiGetRotationMatrix (hObj, &rot);
 		sdir = tmul (rot, -pos);
 		double csun = sdir.y;
-		bool night = csun < csun_lights;
+		// (A twilight RAMP was built here 2026-09-01 and REVERTED on his flight
+		//  the same evening: "when someone is in a building, they turn on the
+		//  lights at dusk... that is a flip, not a ramp." Interior lights are
+		//  switched by people, not faded by the sun - the stock flip stays.)
+		// ORO patch (ac): the addon may FORCE the night state (BASE LIGHTS - low
+		// visibility is when an airfield switches its lights on). Off = stock flip.
+		extern bool g_gcBaseLightsForce;
+		bool night = (csun < csun_lights) || g_gcBaseLightsForce;
 		if (lights != night) {
 			DWORD i;
 			for (i = 0; i < nstructure_bs; i++)	structure_bs[i]->SetTexMixture (1, night ? 1.0f:0.0f);
@@ -382,11 +393,29 @@ bool vBase::Update (bool bMainScene)
 //
 bool vBase::RenderSurface(LPDIRECT3DDEVICE9 dev)
 {
-	// note: assumes z-buffer disabled
 	if (!active) return false;
 	if (!IsVisible()) return false;
 
 	pCurrentVisual = this;
+
+	// ORO patch (z) round 2: the surface objects obey the depth buffer now
+	// (runways/pads painted through mountains was the stock symptom), and the
+	// price is that they sit near-coplanar with the terrain that wrote that
+	// depth - flown round 1 z-fought hard. A camera-ward depth bias settles
+	// the coplanar contest in the decal's favour while staying orders of
+	// magnitude too small to see through real terrain: the constant part is
+	// ~300 ticks of a 24-bit buffer, the slope-scaled part is what carries
+	// grazing angles, where a ground plane's depth slope per pixel is huge.
+	// Cleared below - these states are not in any pass block, so nothing
+	// else in the frame resets them for us.
+	const float fBias = -0.00002f, fSlope = -2.0f;
+	dev->SetRenderState(D3DRS_DEPTHBIAS, *(DWORD*)&fBias);
+	dev->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, *(DWORD*)&fSlope);
+
+	// ORO patch (ac): the night-light glow gain, scoped to THIS base's draws (the vessel
+	// shaders serve hulls too, and a hull's cabin lights must not bloom because a runway
+	// does). Restored to 1 before the function returns.
+	{ extern float g_gcBaseLightsGlow; if (D3D9Effect::eBaseGlow) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseGlow, g_gcBaseLightsGlow); }
 
 	// render tiles
 	if (tilemesh) {
@@ -405,6 +434,11 @@ bool vBase::RenderSurface(LPDIRECT3DDEVICE9 dev)
 		}
 	}
 
+	if (D3D9Effect::eBaseGlow) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseGlow, 1.0f);   // ORO patch (ac)
+	// ORO patch (z): clear the depth bias - see the note at the top
+	dev->SetRenderState(D3DRS_DEPTHBIAS, 0);
+	dev->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, 0);
+
 	return true;
 }
 
@@ -422,6 +456,8 @@ bool vBase::RenderStructures(LPDIRECT3DDEVICE9 dev)
 	if (tilemesh) uCurrentMesh++;
 	uCurrentMesh += nstructure_bs;
 
+	{ extern float g_gcBaseLightsGlow; if (D3D9Effect::eBaseGlow) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseGlow, g_gcBaseLightsGlow); }   // ORO patch (ac)
+
 	// render generic objects above shadows
 	for (DWORD i=0; i<nstructure_as; i++) {
 		FVECTOR3 bs = structure_as[i]->GetBoundingSpherePos();
@@ -431,8 +467,45 @@ bool vBase::RenderStructures(LPDIRECT3DDEVICE9 dev)
 		structure_as[i]->Render(&mWorld, RENDER_BASE);
 		++uCurrentMesh;
 	}
+	if (D3D9Effect::eBaseGlow) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseGlow, 1.0f);   // ORO patch (ac)
 	return true;
 }
+
+
+// ===========================================================================================
+// ORO patch (z2): base structures join the depth-normal buffer (2026-09-02, his
+// light-through-the-hangar screenshot). GBUF_DEPTH held VESSELS + COCKPIT only, so every
+// consumer that asks it a visibility question was blind to buildings: the sun and
+// local-light glare kernels painted their sprites straight through a hangar, and the
+// Sketchpad depth clip (patch g) let addon geometry draw in front of structures it should
+// vanish behind. Same RenderShadowMap(opt 1) path the vessels use - the function is
+// mesh-generic, and patch (f) part 2's transparent-caster skip rides along, so a glass
+// wall correctly fails to occlude.
+// ⚠️ ABOVE-SHADOW STRUCTURES ONLY, deliberately: the ground-level sets (tilemesh,
+// structure_bs - runways, aprons, pads) are coplanar with TERRAIN, which never writes
+// this buffer either. Admitting one side of that contest would make addon geometry clip
+// against an apron but not the grass beside it - worse than staying out entirely.
+// ORO patch (z3): grew an opt parameter. opt 1 (default) is the (z2) behaviour above;
+// opt 0 renders the same above-shadow set into a LIGHT's shadow map via the
+// SHADER_SHADOWMAP technique, so a spotlight beam is carved by a hangar. The
+// ground-level exclusion is just as right there - coplanar-with-terrain geometry
+// shadowing the terrain it lies on would be pure acne.
+// ===========================================================================================
+bool vBase::RenderStructureDepth(const LPD3DXMATRIX pVP, int opt)
+{
+	if (!active) return false;
+	// ⚠️ IsVisible() is a CAMERA test and belongs to opt 1 ONLY (GBUF_DEPTH is the
+	// camera's own screen-space buffer). A LIGHT-space map (opt 0) must never
+	// view-cull its casters: rotating the camera until the base left the frustum
+	// dropped every structure out of the shadow maps and the whole draped shadow
+	// strobed with the view direction - his daylight rotation test, 2026-09-02.
+	if (opt == 1 && !IsVisible()) return false;
+	for (DWORD i = 0; i < nstructure_as; i++)
+		structure_as[i]->RenderShadowMap(&mWorld, pVP, opt);
+	return true;
+}
+
+
 
 
 // ===========================================================================================
@@ -444,6 +517,9 @@ void vBase::RenderRunwayLights(LPDIRECT3DDEVICE9 dev)
 
 	pCurrentVisual = this;
 
+	{ extern float g_gcBaseLightsGlow; if (D3D9Effect::eBaseGlow) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseGlow, g_gcBaseLightsGlow); }   // ORO patch (ac)
+	{ extern float g_gcBaseLightsHalo; if (D3D9Effect::eBaseHalo) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseHalo, g_gcBaseLightsHalo); }   // ORO patch (ac) part 2
+
 	for(int i=0; i<numRunwayLights; i++)
 	{
 		if (scn->GetRenderPass() == RENDERPASS_MAINSCENE) runwayLights[i]->Update(vP);
@@ -454,6 +530,7 @@ void vBase::RenderRunwayLights(LPDIRECT3DDEVICE9 dev)
 	{
 		taxiLights[i]->Render(dev, &mWorld, lights);
 	}
+	if (D3D9Effect::eBaseGlow) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseGlow, 1.0f);   // ORO patch (ac)
 	
 	if (DebugControls::IsActive()) {
 		DWORD flags = *(DWORD*)gc->GetConfigParam(CFGPRM_GETDEBUGFLAGS);
@@ -550,7 +627,26 @@ void vBase::RenderGroundShadow(LPDIRECT3DDEVICE9 dev, float alpha)
 				
 			D3DXVECTOR4 nrml = D3DXVECTOR4(float(n.x), float(n.y), float(n.z), zo);
 
-			structure_as[i]->RenderShadowsEx(scale, &mProj, &mWorld, &nrml, &param);
+			// ORO patch (aa): the storm collapse and the fog reach this shadow too, at the
+			// STRUCTURE's own position (a base spans kilometres, so per base would be
+			// wrong for everything but the middle). Stock drew these at full strength
+			// under any overcast and through any fog - which is what left the buildings'
+			// shadows floating in a fog that had erased the buildings. See
+			// OroGroundShadowFade in Scene.cpp; 1.0 with no storm and no fog.
+			float fscale = scale;
+			{
+				extern float OroGroundShadowFade(const D3DXVECTOR3& posW);
+				D3DXVECTOR3 bsl(structure_as[i]->BBox.bs.x, structure_as[i]->BBox.bs.y, structure_as[i]->BBox.bs.z), bsw;
+				D3DXVec3TransformCoord(&bsw, &bsl, &mWorld);   // base-local -> camera-relative
+				fscale *= OroGroundShadowFade(bsw);
+			}
+			{
+				extern int g_oroDbgStrDrawn, g_oroDbgStrSkip;   // ORO patch (ab) INSTRUMENT
+				if (fscale < 0.005f) g_oroDbgStrSkip++; else g_oroDbgStrDrawn++;
+			}
+			if (fscale < 0.005f) continue;
+
+			structure_as[i]->RenderShadowsEx(fscale, &mProj, &mWorld, &nrml, &param);
 		}
 	}
 }

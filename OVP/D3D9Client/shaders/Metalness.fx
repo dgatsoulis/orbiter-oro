@@ -168,7 +168,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 
 	// Sample emission map. (Note: Emissive materials and textures need to go different stages, material is added to light)
 	//
-	if (gCfg.Emis) cEmis = tex2D(EmisS, frg.tex0.xy).rgb;
+	if (gCfg.Emis) cEmis = tex2D(EmisS, frg.tex0.xy).rgb * gBaseGlow;   // ORO patch (ac): 1 on vessels
 	else		   cEmis = 0;
 
 	// Sample specular map																										// Added
@@ -193,7 +193,10 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 	// path-tint instrument went in: Glint > 1.9 painted each path a colour, and one
 	// screenshot answered MAGENTA - this file, the only path with no weather code.
 	// Sixth sweep of the "every path or behaviour depends on the path" rule.
-	float3 cSun = gSun.Color * lerp(float3(1.1, 1.1, 0.9), float3(1,1,1), saturate(gRadius[3]*2e-5)) * (1.0f - gStorm);
+	// ORO patch (aa): the fog, up front - the direct sun through the column above the pixel.
+	float  fogT = 1.0f, fogSun = 1.0f; float3 cFog = 0;
+	OroFog(-frg.camW, -gSun.Dir, fogT, fogSun, cFog);
+	float3 cSun = gSun.Color * lerp(float3(1.1, 1.1, 0.9), float3(1,1,1), saturate(gRadius[3]*2e-5)) * (1.0f - gStorm) * fogSun;
 
 
 	// ======================================================================
@@ -273,7 +276,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 
 	//cAmbient = saturate(cAmbient * (1.0f + 15.0f * gNightTime));	
 	// Apply base ambient light
-	cAmbient = max(cAmbient, gSun.Ambient * (1.0f + gStorm * 1.8f));   // ORO patch (s) part 2
+	cAmbient = max(cAmbient, gSun.Ambient * (1.0f + gStorm * 1.8f) * (1.0f + gFogLift * (1.0f - fogSun)));   // ORO patch (s) part 2 + (aa)
 #endif
 #endif
 
@@ -281,7 +284,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 	// ======================================================================
 	// Compute Earth glow
 	float angl = saturate((-dot(gCameraPos, nrmW) - gProxySize) * gInvProxySize);
-	float3 cAmbient = gAtmColor.rgb * (max(0, angl * gGlowConst) * PShineShadow(-frg.camW)) + gSun.Ambient * (1.0f + gStorm * 1.8f);   // ORO patch (s) part 2 + (w)
+	float3 cAmbient = gAtmColor.rgb * (max(0, angl * gGlowConst) * PShineShadow(-frg.camW)) + gSun.Ambient * (1.0f + gStorm * 1.8f) * (1.0f + gFogLift * (1.0f - fogSun));   // ORO patch (s) part 2 + (w) + (aa)
 #endif
 
 
@@ -292,13 +295,17 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 	// Add vessel self-shadows
 	// ======================================================================
 	float fAmbShd = 1.0f;         // ORO patch (p): ambient survival in shadow
-#if SHDMAP > 0
 	{
-		float fShd = smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
+		float fShd = 1.0f;        // ORO patch (ae): the cascade term outside the SHDMAP block (see PBR.fx)
+#if SHDMAP > 0
+		fShd = smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
+#endif
+#if defined(_CASCADE)
+		fShd = min(fShd, OroCascadeShadow(-frg.camW, nrmW, -gSun.Dir));   // ORO patch (ae): the world's shadows on the hull
+#endif
 		cSun *= fShd;
 		fAmbShd = lerp(1.0f, fShd, gVCShdDepth);
 	}
-#endif
 	
 
 	// ======================================================================
@@ -358,6 +365,9 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 	// Add a faint diffuse hue for rough metals. Rough metal doesn't look good if it's totally black
 	fA += fRgh * fMetal * 0.05f;
 
+	// ORO patch (aa): SNOW COVER on the up-facing hull - dormant at gSnow.x 0
+	[branch] if (gSnow.x > 0.0f)
+		cDiff.rgb = lerp(cDiff.rgb, ORO_SNOW_ALBEDO, OroSnowMask(nrmW, gFogCam.xyz, 1e9f, frg.tex0.xy * 24.0f));
 	// ORO patch (s): wet albedo damp, same 0.66 as every other path
 	if (gSurfWet > 0.001f) cDiff.rgb *= lerp(1.0f, 0.66f, gSurfWet);
 
@@ -399,6 +409,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 #if defined(_LIGHTGLOW)
 	cDiff.rgb *= gSun.Transmission;
 	cDiff.rgb += gSun.Inscatter;
+	cDiff.rgb = lerp(cDiff.rgb, cFog, 1.0f - fogT);   // ORO patch (aa): the fog goes on last
 	return cDiff;
 #else
 	float3 h2 = cDiff.rgb * cDiff.rgb;
@@ -406,6 +417,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 
 	cDiff.rgb *= gSun.Transmission;
 	cDiff.rgb += gSun.Inscatter;
+	cDiff.rgb = lerp(cDiff.rgb, cFog, 1.0f - fogT);   // ORO patch (aa): the fog goes on last
 
 	return cDiff;
 #endif

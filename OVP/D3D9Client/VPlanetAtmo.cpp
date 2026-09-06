@@ -141,7 +141,7 @@ void vPlanet::GlobalInitAtmosphere(oapi::D3D9Client* gc)
 
 	if (bLocals) flags += "_LOCALLIGHTS ";
 	if (Config->MicroMode) flags += "_MICROTEX ";
-	if (Config->ShadowMapMode) flags += "_SHDMAP ";
+	if (Config->ShadowMapMode || Config->TerrainShadowing == 3) flags += "_SHDMAP ";	// ORO patch (ae): the cascade atlas rides the shadow sampler too - the terrain must be able to sample it with Vessel mapping None
 	if (Config->EnableMeshDbg) flags += "_DEVTOOLS ";
 	if (!Config->bAtmoQuality) flags += "_PERFORMANCE ";
 
@@ -161,7 +161,7 @@ void vPlanet::GlobalInitAtmosphere(oapi::D3D9Client* gc)
 	if (bNightLights) flags += "_NIGHTLIGHTS ";
 	if (bLocals) flags += "_LOCALLIGHTS ";
 
-	if (Config->ShadowMapMode) flags += "_SHDMAP ";
+	if (Config->ShadowMapMode || Config->TerrainShadowing == 3) flags += "_SHDMAP ";	// ORO patch (ae): the cascade atlas rides the shadow sampler too - the terrain must be able to sample it with Vessel mapping None
 	if (Config->EnableMeshDbg) flags += "_DEVTOOLS ";
 	if (!Config->bAtmoQuality) flags += "_PERFORMANCE ";
 

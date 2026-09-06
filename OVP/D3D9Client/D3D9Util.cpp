@@ -1926,7 +1926,14 @@ void ShaderClass::Setup(LPDIRECT3DVERTEXDECLARATION9 pDecl, bool bZ, int blend)
 	VP.MinZ = 0.0f;
 	VP.MaxZ = 1.0f;
 
-	HR(pDev->SetViewport(&VP));
+	// ORO patch (ae): THE CASCADE PASS RENDERS SIX SLOTS INTO ONE TARGET through per-slot
+	// viewports, and every caster path - the mesh shadow-map shader, the tile shader, the
+	// structure depth - comes through here. This reset was drawing every caster magnified
+	// across the whole atlas (his Brighton Beach flight: shadow shapes that changed with
+	// the camera distance). Stock never noticed - one map per target. The pass raises the
+	// latch; everything else keeps stock's reset.
+	extern bool g_oroKeepViewport;
+	if (!g_oroKeepViewport) HR(pDev->SetViewport(&VP));
 
 	HR(pDev->SetVertexShader(pVS));
 	HR(pDev->SetPixelShader(pPS));

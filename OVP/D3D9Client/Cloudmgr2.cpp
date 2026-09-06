@@ -204,6 +204,8 @@ void TileManager2<CloudTile>::Render (MATRIX4 &dwmat, bool use_zbuf, const vPlan
 	pShader->SetPSConstants("Const", vp->GetScatterConst(), sizeof(ConstParams));
 	pShader->SetVSConstants("Const", vp->GetScatterConst(), sizeof(ConstParams));
 	pShader->SetPSConstants("Flow", fc, sizeof(FlowControlPS));
+	// ORO patch (aa): fog on the cloud layer seen from below (its own constant table).
+	{ extern void OroFogPushPS(ShaderClass* pShader); OroFogPushPS(pShader); }
 
 	if (cfg != PLT_GIANT)
 	{

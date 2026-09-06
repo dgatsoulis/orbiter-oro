@@ -183,6 +183,12 @@
 #define IDC_PRTLEAD                             4069	// ORO: dawn tint lead slider (same rule)
 #define IDC_PRTSAT                              4070	// ORO: dawn tint depth slider
 #define IDC_PRTBLOOM                            4071	// ORO: dawn tint bloom slider
+#define IDC_SHDMAPSIZE                          4072	// ORO patch (ae): the Shadows box - vessel map size combo
+#define IDC_LCLSHADOWS                          4073	// ORO patch (ae): local light shadows checkbox
+#define IDC_CASCSIZE                            4074	// ORO patch (ae): cascade detail combo
+#define IDC_CASCFAR                             4075	// ORO patch (ae): cascade reach slider (km)
+#define IDC_CASCFAR_DSP                         4076	// ORO patch (ae): its readout
+#define IDC_CASCSOFT                            4077	// ORO patch (ae): soft far shadows checkbox
 #define IDC_TILECOUNT                           3036
 #define IDC_ATM_S1                              4000
 #define IDC_ATM_S2                              4001

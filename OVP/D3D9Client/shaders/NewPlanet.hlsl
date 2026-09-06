@@ -113,11 +113,138 @@ struct PerObjectParams
 
 uniform extern float gWet;            // ORO patch (s): ground wetness, 0..1
 uniform extern float gStorm;          // ORO patch (s) part 2: overcast factor, 0..1
+
+// ============================================================================
+// ORO patch (aa): THE AIR - FOG (two analytic height-fog layers) and SNOW COVER.
+// ----------------------------------------------------------------------------
+// The client computes the constants once per frame (Scene.cpp, OroFogFrame): two slabs
+// with an exponential density profile, the fog's colour in DISPLAY space, the sun lobe,
+// the ambient lift and the on/off K (0 for the cockpit interior draw). Every consumer
+// calls OroFog() with the pixel's camera-relative position, attenuates its direct sun by
+// sunAtt, lifts its ambient by gFogLift * (1 - sunAtt), and lerps its FINAL colour toward
+// col by (1 - T) - after any tone curve, so every shader family lands on the same grey.
+// Exactly inert at density 0. This block is kept byte-identical between D3D9Client.fx
+// and NewPlanet.hlsl: the two shader roots do not share an include.
+// ============================================================================
+uniform extern float4 gFogPrm[6];   // [0] xyz = planet-up at the camera, w = camera geocentric radius
+                                    // [1],[2] layer 0/1: hc (camera height over the base), hTop, iH, dens
+                                    // [3],[4] layer 0/1: exp(-hTop*iH), dens/(iH*sinSunElev), 0, 0
+                                    // [5] x = K (1 fog on, 0 off)
+uniform extern float4 gFogClr[3];   // [0] fog colour, [1] sun lobe colour, [2].w = ambient lift gain
+uniform extern float4 gSnow;        // cover 0..1, snow-line altitude (m), 1/line width, 0
+#define gFogCam  gFogPrm[0]
+#define gFogL0   gFogPrm[1]
+#define gFogL1   gFogPrm[2]
+#define gFogM0   gFogPrm[3]
+#define gFogM1   gFogPrm[4]
+#define gFogK    gFogPrm[5].x
+#define gFogSunCam gFogPrm[5].y   // the camera's own sun transmittance (for paths that cannot afford the per-pixel one)
+#define gFogCol  gFogClr[0]
+#define gFogSun  gFogClr[1]
+#define gFogLift gFogClr[2].w
+
+// Optical depth of one layer along the segment from the camera (height hc over the layer
+// base, in L.x) to a pixel at height hp, length d. The segment is clipped to the slab
+// 0..hTop and the height taken linear along it - exact for a straight ray at fog range.
+float OroFogTau(float4 L, float hp, float d)
+{
+	float dens = L.w * gFogK;
+	float hc = L.x, top = L.y, iH = L.z;
+	float dh = hp - hc;
+	float idh = (abs(dh) > 1e-3f) ? 1.0f / dh : 0.0f;
+	float t0 = 0.0f, t1 = 1.0f;
+	if (hc > top) { t0 = (hp >= top) ? 1.0f : (top - hc) * idh; }
+	else if (hp > top) t1 = (top - hc) * idh;
+	if (hc < 0.0f) { t0 = (hp <= 0.0f) ? 1.0f : max(t0, -hc * idh); }
+	else if (hp < 0.0f) t1 = min(t1, -hc * idh);
+	float span = max(t1 - t0, 0.0f);
+	float h0 = hc + dh * t0, h1 = hc + dh * t1;
+	float e0 = exp(-h0 * iH), e1 = exp(-h1 * iH);
+	float k  = (h1 - h0) * iH;
+	float mean = (abs(k) > 1e-3f) ? (e0 - e1) / k : 0.5f * (e0 + e1);
+	return dens * d * span * mean;
+}
+
+// Sun attenuation at height hp inside one layer: the column above it to the top, over
+// the sine of the sun's elevation (both folded into M.y on the CPU).
+float OroFogSunTau(float4 L, float4 M, float hp)
+{
+	float e = exp(-clamp(hp, 0.0f, L.y) * L.z);
+	return M.y * max(e - M.x, 0.0f);
+}
+
+// posW = the pixel's camera-relative position, toSun = unit vector toward the sun.
+// T = transmittance camera->pixel, sunAtt = share of the direct sun reaching the pixel,
+// col = what the fog puts in front of it (display space).
+void OroFog(float3 posW, float3 toSun, out float T, out float sunAtt, out float3 col)
+{
+	T = 1.0f; sunAtt = 1.0f; col = 0.0f;
+	// K (0 for the cockpit interior draw) governs only the AIR between the pixel and
+	// the eye - it rides dens inside OroFogTau, so T is 1 in the cabin. The sun's column
+	// above the pixel is real wherever the pixel is, so sunAtt does NOT take K: the sun
+	// entering the cabin crossed the fog, and the panel shadows soften with it.
+	[branch] if ((gFogL0.w + gFogL1.w) > 0.0f) {
+		float  d   = length(posW);
+		float3 ray = posW / max(d, 1e-3f);
+		float  rp  = length(gFogCam.xyz * gFogCam.w + posW);   // pixel geocentric radius
+		float  dr  = rp - gFogCam.w;                           // pixel height minus camera height
+		float  hp0 = gFogL0.x + dr, hp1 = gFogL1.x + dr;
+		T = exp(-(OroFogTau(gFogL0, hp0, d) + OroFogTau(gFogL1, hp1, d)));
+		sunAtt = exp(-(OroFogSunTau(gFogL0, gFogM0, hp0) + OroFogSunTau(gFogL1, gFogM1, hp1)));
+		float ph = saturate(dot(ray, toSun));
+		ph *= ph; ph *= ph; ph *= ph;                          // pow 8: a tight lobe around the sun
+		col = gFogCol.rgb + gFogSun.rgb * ph;
+	}
+}
+
+// SNOW COVER (dormant at gSnow.x 0; the look is tuned in the snow round). Up-facing
+// surfaces whiten above the snow line, patches filling in as the cover rises through a
+// static thresholded value noise. nuv = any static 2D coordinate of the surface.
+float OroSnowNoise(float2 p)
+{
+	float2 i = floor(p), f = frac(p);
+	f = f * f * (3.0f - 2.0f * f);
+	float a = frac(sin(dot(i,                float2(127.1f, 311.7f))) * 43758.5453f);
+	float b = frac(sin(dot(i + float2(1, 0), float2(127.1f, 311.7f))) * 43758.5453f);
+	float c = frac(sin(dot(i + float2(0, 1), float2(127.1f, 311.7f))) * 43758.5453f);
+	float d = frac(sin(dot(i + float2(1, 1), float2(127.1f, 311.7f))) * 43758.5453f);
+	return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+float OroSnowMask(float3 nrmW, float3 up, float alt, float2 nuv)
+{
+	float c = gSnow.x;
+	float slope = smoothstep(0.30f, 0.75f, dot(nrmW, up));
+	float lineF = saturate((alt - gSnow.y) * gSnow.z + 0.5f);
+	float n     = 0.65f * OroSnowNoise(nuv) + 0.35f * OroSnowNoise(nuv * 3.1f + 7.3f);
+	float edge  = smoothstep(1.0f - c * 1.15f - 0.12f, 1.0f - c * 1.15f + 0.12f, n);
+	return (c > 0.0f) ? slope * lineF * edge : 0.0f;
+}
+#define ORO_SNOW_ALBEDO float3(0.86f, 0.88f, 0.93f)
 uniform extern float gWetDark;        // ORO patch (s) part 3: wet albedo darkening gain
 uniform extern float4 gWetReflPrm;    // ORO patch (s) part 6: 1/W, 1/H, gain, live
 uniform extern float4 gWetSwimPrm = {1, 1, 1, 1};  // ORO patch (s): swim amp, swim rate, pool size, pool reach
 uniform extern float4 gWetGrainPrm = {1, 1, 0, 0}; // ORO patch (s) part 7: grain opacity, grain size
 sampler tWetRefl;                     // ORO patch (s) part 6: the planar mirror
+// ORO patch (z3): the LOCAL-LIGHT shadow map - one perspective depth map rendered from
+// the frame's strongest shadow-casting SPOT light (Scene::RenderLocalLightShadowMap).
+// vLShd.x = which of THIS TILE's four light slots it shadows (-1 = none), .y = 1/mapsize.
+// Standalone uniforms by the patch (s) rule: the mirrored Prm struct is never grown.
+// ⚠️ NO SAMPLER OF ITS OWN: the Earth config with _DEVTOOLS sits at EXACTLY the ps_3_0
+// 16-sampler ceiling in stock (X4510 with a 17th - flown, not theorised), so the local
+// map BORROWS the tShadowMap slot per tile. A tile whose vLShd.x >= 0 gets the local
+// map bound there and its bShadows forced off (Surfmgr2), yielding the sun's projected
+// shadow on that tile for the frame - a tile inside a spotlight's beam, which matters
+// at night, where the sun term is ~0 anyway. Every other tile keeps the sun map.
+// ORO patch (ae): THE CASCADED SUN SHADOW ATLAS - see D3D9Client.fx for the story. The
+// atlas rides tShadowMap in mode 3 (Surfmgr2 binds it per tile; a tile that borrowed
+// the slot for a LOCAL light has vLShd.x >= 0 and skips the lookup).
+uniform extern float4   vCascBasis[3];   // round 7: the shared light basis U, V, L (U.w = ShadowDebug)
+uniform extern float4   vCascA[9];       // per slot: centre u, centre v, near-plane depth, 1/range
+uniform extern float4   vCascTx[3];      // the nine slots' texels (m), four to a register
+uniform extern float4   vCascSplit = {0, 0, 0, 0};
+uniform extern float4   vCascAtlas = {0, 0, 0, 0};
+uniform extern float4x4 mLsVP;
+uniform extern float4   vLShd = {-1.0, 0.0, 0.0, 0.0};
 uniform extern PerObjectParams Prm;
 uniform extern FlowControlPS Flow;
 uniform extern FlowControlVS FlowVS;
@@ -176,6 +303,164 @@ float SampleShadows(float2 sp, float pd)
 	return va * 0.1111111f;
 }
 
+
+// -------------------------------------------------------------------------------------------------------------
+// ORO patch (z3): sample the local-light shadow map at a world position. Returns the
+// LIT factor (1 = lit, 0 = fully shadowed). Same depth convention as the sun's map:
+// the caster shader (ShdMapPS, NewMesh.hlsl) stores 1 - z/w, so "stored > receiver"
+// means something sits between this pixel and the light. tex2Dlod, NOT tex2D: the
+// call sits behind a comparison on a float uniform, which is dynamic flow control,
+// and ps_3_0 refuses divergent gradient ops there (the map has one mip anyway).
+// The bias is RELATIVE on (1 - z/w) - for a perspective map that peaks mid-beam and
+// vanishes at both ends, which is where slope acne actually lives.
+// tShadowMap here holds the LOCAL map, not the sun's - the borrowed slot (see the
+// vLShd comment above): Surfmgr2 rebinds it for exactly the tiles where vLShd.x >= 0.
+//
+float SampleLocalShadow(float3 posW, float3 nrmW, float dstL, float nl)
+{
+	// ORO patch (ae) round 8: in mode 3 (the atlas bound, vCascAtlas.z > 0) the local
+	// map sits in the atlas' spare row, first cell, HALF-SIZE (a 2048 map lands in a
+	// 1024 cell, point-sampled), so its texel is coarser than vLShd says by
+	// k = map size / cell size; the offset and the bias scale with it, the taps step
+	// in atlas texels, and the sample stays inside the cell. Nothing is borrowed, so a
+	// tile gets the sun's cascades AND the beam's shadow, day and night.
+	const bool  inAtlas = (vCascAtlas.z > 0.5f);
+	const float k = inAtlas ? (6.0f * vCascAtlas.x) / vLShd.y : 1.0f;   // map texels per cell texel
+	const float tz = vLShd.z * k;
+
+	// NORMAL-OFFSET (vLShd.z = world texel per metre of light distance): push the
+	// receiver point ~2 map texels out along its surface normal before the depth
+	// test - the ordinary-acne cure.
+	posW += nrmW * (dstL * tz * 2.0f);
+
+	float4 q = mul(float4(posW, 1.0f), mLsVP);
+	if (q.w < 0.001f) return 1.0f;						// behind the light: lit
+	q.xyz /= q.w;
+	float2 sp = q.xy * float2(0.5f, -0.5f) + 0.5f;
+	if (sp.x < 0 || sp.x > 1 || sp.y < 0 || sp.y > 1) return 1.0f;	// outside the map: lit
+	if (q.z < 0 || q.z > 1) return 1.0f;
+
+	float pd = (1.0f - q.z) * 1.012f + 0.0008f;
+
+	// TEXEL-FOOTPRINT BIAS: at grazing incidence one texel's footprint on the
+	// receiving surface spans (texel / tan(incidence)) metres of ray depth, and
+	// the surface strobes against ITSELF within that span (the runway test's
+	// coherent black wedge - flown twice). Clear exactly that span, scaled by
+	// the PCF tap radius: near-nothing face-on, metres at grazing, and always
+	// far smaller than a REAL caster's depth separation, so building and vessel
+	// shadows stay solid. vLShd.w converts metres-along-ray to 1-z/w units.
+	float grz = sqrt(saturate(1.0f - nl * nl)) / max(nl, 0.05f);
+	pd += (tz * 3.0f) * grz * vLShd.w / max(dstL, 1.0f);
+
+	float2 dx = float2(vLShd.y, 0) * 1.5f;
+	float2 dy = float2(0, vLShd.y) * 1.5f;
+	if (inAtlas) {
+		const float2 uvo = float2(0.0f, 0.75f), sc = float2(1.0f / 6.0f, 0.25f);   // the cell: row 3, column 0
+		sp = clamp(uvo + sp * sc, uvo + vCascAtlas.xy * 2.0f, uvo + sc - vCascAtlas.xy * 2.0f);
+		dx = float2(vCascAtlas.x, 0) * 1.5f;
+		dy = float2(0, vCascAtlas.y) * 1.5f;
+	}
+	float  va = 0;
+	if (tex2Dlod(tShadowMap, float4(sp - dx, 0, 0)).r > pd) va++;
+	if (tex2Dlod(tShadowMap, float4(sp + dx, 0, 0)).r > pd) va++;
+	if (tex2Dlod(tShadowMap, float4(sp - dy, 0, 0)).r > pd) va++;
+	if (tex2Dlod(tShadowMap, float4(sp + dy, 0, 0)).r > pd) va++;
+	return 1.0f - va * 0.25f;
+}
+
+
+// ORO patch (ae): the terrain's copy of OroCascadeShadow (this file is its own compile
+// unit) - see D3D9Client.fx for the story of every term. All six cascades here, plus the
+// four hull boxes; the sampler is the borrowed tShadowMap.
+float OroCascTapT(float4 A, float tx, float2 uvo, float2 sc, float3 l, float3 ln, float2 g, float sn, float grz, float on)
+{
+	tx = max(tx, 1.0e-6f);
+	float3 p  = l + ln * (0.5f * tx * sn);
+	float  invR = 2.0f * vCascAtlas.x / (tx * sc.x);
+	float2 sp = (p.xy - A.xy) * (invR * 0.5f) + 0.5f;
+	float  z  = (p.z - A.z) * A.w;
+	[branch] if (on < 0.5f || any(sp < 0.0f) || any(sp > 1.0f) || z < 0.0f || z > 1.0f) return 1.0f;
+	float2 tuv = vCascAtlas.xy;
+	float2 uv  = clamp(uvo + sp * sc, uvo + tuv * 1.5f, uvo + sc - tuv * 1.5f);
+	float2 tc  = uv / tuv - 0.5f;
+	float2 fl  = floor(tc), fr = tc - fl;
+	float2 b   = (fl + 0.5f) * tuv;
+	float2 dz  = g * (tx * A.w);
+	float  z0  = z + dot(g, (b - uv) / tuv * tx) * A.w;
+	float  pd  = 1.0f - z0 + tx * (0.6f + 0.35f * grz) * A.w;
+	float s00 = (tex2Dlod(tShadowMap, float4(b, 0, 0)).r > pd) ? 1.0f : 0.0f;
+	float s10 = (tex2Dlod(tShadowMap, float4(b.x + tuv.x, b.y, 0, 0)).r > pd - dz.x) ? 1.0f : 0.0f;
+	float s01 = (tex2Dlod(tShadowMap, float4(b.x, b.y + tuv.y, 0, 0)).r > pd - dz.y) ? 1.0f : 0.0f;
+	float s11 = (tex2Dlod(tShadowMap, float4(b + tuv, 0, 0)).r > pd - dz.x - dz.y) ? 1.0f : 0.0f;
+	return 1.0f - lerp(lerp(s00, s10, fr.x), lerp(s01, s11, fr.x), fr.y);
+}
+
+// the wide tent for the coarse slots - see OroCascTapCW in D3D9Client.fx
+float OroCascTapWT(float4 A, float tx, float2 uvo, float2 sc, float3 l, float3 ln, float2 g, float sn, float grz, float on)
+{
+	tx = max(tx, 1.0e-6f);
+	float3 p  = l + ln * (0.75f * tx * sn);
+	float  invR = 2.0f * vCascAtlas.x / (tx * sc.x);
+	float2 sp = (p.xy - A.xy) * (invR * 0.5f) + 0.5f;
+	float  z  = (p.z - A.z) * A.w;
+	[branch] if (on < 0.5f || any(sp < 0.0f) || any(sp > 1.0f) || z < 0.0f || z > 1.0f) return 1.0f;
+	float2 tuv = vCascAtlas.xy;
+	float2 uv  = clamp(uvo + sp * sc, uvo + tuv * 2.5f, uvo + sc - tuv * 2.5f);
+	float2 tc  = uv / tuv - 0.5f;
+	float2 fl  = floor(tc), fr = tc - fl;
+	float2 b   = (fl - 0.5f) * tuv;
+	float4 cx  = b.x + float4(0.0f, 1.0f, 2.0f, 3.0f) * tuv.x;
+	float4 cy  = b.y + float4(0.0f, 1.0f, 2.0f, 3.0f) * tuv.y;
+	float4 wx  = float4(1.0f - fr.x, 1.0f, 1.0f, fr.x);
+	float4 wy  = float4(1.0f - fr.y, 1.0f, 1.0f, fr.y);
+	float2 dz  = g * (tx * A.w);
+	float  z0  = z + dot(g, (b - uv) / tuv * tx) * A.w;
+	float  pd  = 1.0f - z0 + tx * 1.5f * (0.6f + 0.35f * grz) * A.w;
+	float  sh  = 0.0f;
+	[unroll] for (int j = 0; j < 4; j++) {
+		[unroll] for (int i = 0; i < 4; i++) {
+			float dp = tex2Dlod(tShadowMap, float4(cx[i], cy[j], 0, 0)).r;
+			sh += wx[i] * wy[j] * ((dp > pd - i * dz.x - j * dz.y) ? 1.0f : 0.0f);
+		}
+	}
+	return 1.0f - sh / 9.0f;
+}
+
+float OroCascadeShadowT(float3 posW, float3 nrmW, float3 toSun)
+{
+	float  d  = length(posW);
+	if (d > vCascAtlas.w) return 1.0f;
+	float3 U  = vCascBasis[0].xyz, V = vCascBasis[1].xyz, L = vCascBasis[2].xyz;
+	float3 l  = float3(dot(posW, U), dot(posW, V), dot(posW, L));
+	float3 ln = float3(dot(nrmW, U), dot(nrmW, V), dot(nrmW, L));
+	float  nl = saturate(dot(nrmW, toSun));
+	float  sn = sqrt(saturate(1.0f - nl * nl));
+	float  grz = min(sn / max(nl, 0.05f), 4.0f);
+	float2 g  = clamp(ln.xy / max(nl, 0.15f), -6.0f, 6.0f);
+	// the cascade by distance: 1-3 full-size along the top row, 4-5 half-size on the second
+	const float2 scF = float2(1.0f / 3.0f, 0.5f), scH = float2(1.0f / 6.0f, 0.25f);
+	float4 A = vCascA[1]; float tx = vCascTx[0].y; float si = 1.0f;
+	if (d > vCascSplit.x) { A = vCascA[2]; tx = vCascTx[0].z; si = 2.0f; }
+	if (d > vCascSplit.y) { A = vCascA[3]; tx = vCascTx[0].w; si = 3.0f; }
+	if (d > vCascSplit.z) { A = vCascA[4]; tx = vCascTx[1].x; si = 4.0f; }
+	if (d > vCascSplit.w) { A = vCascA[5]; tx = vCascTx[1].y; si = 5.0f; }
+	float2 uvo = (si < 3.5f) ? float2((si - 1.0f) / 3.0f, 0.0f) : float2((si - 3.0f) / 6.0f, 0.5f);
+	float2 sc  = (si < 3.5f) ? scF : scH;
+	float lit = 1.0f;
+	[branch] if (si < 1.5f || vCascBasis[1].w < 0.5f) lit = OroCascTapT(A, tx, uvo, sc, l, ln, g, sn, grz, 1.0f);    // the near slot (or Soft far shadows off): crisp
+	else                    lit = OroCascTapWT(A, tx, uvo, sc, l, ln, g, sn, grz, 1.0f);   // the coarse slots: the wide tent
+	// the hull boxes (the focus vessel's and the three nearest others'): min, no seam
+	lit = min(lit, OroCascTapT(vCascA[0], vCascTx[0].x, float2(0.0f,        0.5f), scH, l, ln, g, sn, grz, saturate(vCascTx[0].x * 1.0e6f)));
+	lit = min(lit, OroCascTapT(vCascA[6], vCascTx[1].z, float2(0.5f,        0.5f), scH, l, ln, g, sn, grz, saturate(vCascTx[1].z * 1.0e6f)));
+	lit = min(lit, OroCascTapT(vCascA[7], vCascTx[1].w, float2(2.0f / 3.0f, 0.5f), scH, l, ln, g, sn, grz, saturate(vCascTx[1].w * 1.0e6f)));
+	lit = min(lit, OroCascTapT(vCascA[8], vCascTx[2].x, float2(5.0f / 6.0f, 0.5f), scH, l, ln, g, sn, grz, saturate(vCascTx[2].x * 1.0e6f)));
+	float2 sp0 = (l.xy - vCascA[0].xy) * (vCascAtlas.x * 6.0f / max(vCascTx[0].x, 1.0e-9f)) + 0.5f;
+	float  z0  = (l.z - vCascA[0].z) * vCascA[0].w;
+	float  in0 = (all(sp0 > 0.0f) && all(sp0 < 1.0f) && z0 > 0.0f && z0 < 1.0f) ? 1.0f : 0.0f;
+	if (vCascBasis[0].w > 3.5f) return (in0 > 0.5f) ? 0.15f : 0.15f + 0.17f * si;   // INSTRUMENT: slot bands
+	return lit;
+}
+
 // -------------------------------------------------------------------------------------------------------------
 // Local light sources
 //
@@ -227,6 +512,17 @@ void LocalLights(
 	dif = saturate(dif);
 	dif *= (att * spt);
 
+	// ORO patch (z3): the shadow-mapped slot loses its light behind a caster. No
+	// dynamic register indexing in ps_3_0, so the slot picks through a select mask;
+	// the mask also fishes out the slot's light distance for the normal-offset.
+	if (vLShd.x > -0.5f) {
+		float4 sel = float4(abs(vLShd.x - 0.0f) < 0.5f, abs(vLShd.x - 1.0f) < 0.5f,
+		                    abs(vLShd.x - 2.0f) < 0.5f, abs(vLShd.x - 3.0f) < 0.5f);
+		float3 pK = p[0]*sel.x + p[1]*sel.y + p[2]*sel.z + p[3]*sel.w;
+		float  shd = SampleLocalShadow(posW, nrmW, dot(dst, sel), dot(-pK, nrmW));
+		dif *= lerp(float4(1, 1, 1, 1), shd.xxxx, sel);
+	}
+
 	[unroll] for (i = 0; i < 4; i++) diff_out += Lights.diffuse[i].rgb * dif[i];
 }
 
@@ -244,6 +540,73 @@ float GetEclipse(float3 vVrt)
 	return 1.0;
 }
 	
+
+
+// ============================================================================
+// ORO patch (z3) round 2c: terrain tiles as CASTERS into the local-light shadow
+// map - a ridge blocks the beam from the valley behind it. Same depth convention
+// as every other caster (ShdMapPS in NewMesh.hlsl stores 1 - z/w). Tiles are
+// drawn by Scene::RenderLocalLightShadowMap from the list the previous frame's
+// terrain render registered (terrain does not move; one frame stale is free).
+// ============================================================================
+
+uniform extern float4x4 mTileShdW;		// tile world matrix
+uniform extern float4x4 mTileShdVP;		// the light's view-projection
+
+struct TileShdVS_OUT
+{
+	float4 posH : POSITION0;
+	float2 dstW : TEXCOORD0;
+};
+
+TileShdVS_OUT TileShdVS(TILEVERTEX vrt)
+{
+	TileShdVS_OUT outVS = (TileShdVS_OUT)0;
+	float3 posW = mul(float4(vrt.posL, 1.0f), mTileShdW).xyz;
+	outVS.posH = mul(float4(posW, 1.0f), mTileShdVP);
+	outVS.dstW = outVS.posH.zw;
+	return outVS;
+}
+
+float4 TileShdPS(TileShdVS_OUT frg) : COLOR
+{
+	return 1.0f - (frg.dstW.x / frg.dstW.y);
+}
+
+// ============================================================================
+// ORO patch (ab): TERRAIN INTO GBUF_DEPTH. The same tile registry the local-light
+// map draws, rendered through the CAMERA's matrices into the scene's normal+depth
+// buffer with exactly NewMesh.hlsl's encoding: camera-space normal in .rgb, camera
+// DISTANCE in .a (positive - the negated sign is the window glass's, patch (h)).
+// ============================================================================
+uniform extern float4x4 mTileDepthVP;		// the camera's view-projection
+uniform extern float3   vTileDepthCamX;		// camera basis, for the normal encoding
+uniform extern float3   vTileDepthCamY;
+
+struct TileDepthVS_OUT
+{
+	float4 posH : POSITION0;
+	float3 posW : TEXCOORD0;
+	float3 nrmW : TEXCOORD1;
+};
+
+TileDepthVS_OUT TileDepthVS(TILEVERTEX vrt)
+{
+	TileDepthVS_OUT outVS = (TileDepthVS_OUT)0;
+	outVS.posW = mul(float4(vrt.posL, 1.0f), mTileShdW).xyz;
+	outVS.nrmW = mul(float4(vrt.normalL, 0.0f), mTileShdW).xyz;
+	outVS.posH = mul(float4(outVS.posW, 1.0f), mTileDepthVP);
+	return outVS;
+}
+
+float4 TileDepthPS(TileDepthVS_OUT frg) : COLOR
+{
+	float3 n = normalize(frg.nrmW);
+	float x = dot(n, vTileDepthCamX);
+	float y = dot(n, vTileDepthCamY);
+	float z = sqrt(saturate(1.0f - (x * x + y * y)));
+	return float4(x, y, z, length(frg.posW));
+}
 
 
 // ============================================================================
@@ -284,7 +647,12 @@ float4 HorizonPS(HazeVS frg) : COLOR
 	
 	float3 color = HDR(sky.ray.rgb * RayPhase(ph) + (sky.mie.rgb + 0.0008f) * MiePhase(ph) * (0.75f + cGlr * Const.cGlare));
 
-	return float4(color + fNoise, sky.ray.a);
+	// ORO patch (aa): the sky dome through the fog. The ray leaves the layer at its top,
+	// or never near the horizon; 60 km stands in for 'far' and the slab clip does the rest.
+	// The alpha rises with the fog too, so it covers the stars behind the dome.
+	float  fogT = 1.0f, fogSun = 1.0f; float3 cFog = 0;
+	OroFog(uDir * 60000.0f, Const.toSun, fogT, fogSun, cFog);
+	return float4(lerp(color + fNoise, cFog, 1.0f - fogT), lerp(sky.ray.a, 1.0f, 1.0f - fogT));
 }
 
 
@@ -462,6 +830,11 @@ float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
 		float  pd = frg.shdH.z + 0.05f * Prm.vSHD[3];
 		fShadow = 1.0f - SampleShadows(sp, pd);
 	}
+	// ORO patch (ae): mode 3 - the cascade atlas. Since round 8 the local light's map
+	// sits in the same atlas, so a beam-lit tile keeps its sun shadows too.
+	else if (vCascAtlas.z > 0.5f) {
+		fShadow = OroCascadeShadowT(-frg.camW.xyz, normalize(frg.nrmW), Const.toSun);
+	}
 #endif
 
 	float3 cFar, cMed, cLow;
@@ -495,6 +868,9 @@ float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
 	float   dst = dot(vRay, frg.camW.xyz);		// Pixel to camera distance
 	float   rad = frg.camW.w;					// Pixel geo-distance
 	float   alt = rad - Const.PlanetRad;		// Pixel altitude over mean radius
+	// ORO patch (aa): the fog, evaluated up front - the light below changes with it.
+	float  fogT = 1.0f, fogSun = 1.0f; float3 cFog = 0;
+	OroFog(-frg.camW.xyz, Const.toSun, fogT, fogSun, cFog);
 	float  fSrf = (1.0 - Const.CamSpace);		// Camera colse to surface ?
 	float fMask = (1.0 - cMsk.a);				// Specular Mask
 	float  fSpe = 0;
@@ -682,6 +1058,10 @@ float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
 
 	// Evaluate ambient approximation
 	float4 cAmb = AmbientApprox(vPlN, false);
+
+	// ORO patch (aa): SNOW COVER - dormant at gSnow.x 0 (whitens above the snow line)
+	[branch] if (gSnow.x > 0.0f)
+		cTex.rgb = lerp(cTex.rgb, ORO_SNOW_ALBEDO, OroSnowMask(nvrW, vPlN, alt, vUVSrf * 96.0f));
 	
 	LandOut sct = GetLandView(rad, vPlN);
 
@@ -721,8 +1101,8 @@ float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
 	// ORO patch (s) part 2: overcast. The DIRECTIONAL term collapses and the ambient
 	// lifts, which is what a storm deck actually does to the light - shadows and the
 	// warm cast go with it, instead of a post-process dimming the finished frame.
-	cL *= (1.0f - gStorm);
-	cA *= (1.0f + gStorm * 2.2f);
+	cL *= (1.0f - gStorm) * fogSun;                                        // ORO patch (aa): and the fog above
+	cA *= (1.0f + gStorm * 2.2f) * (1.0f + gFogLift * (1.0f - fogSun));   // ...which scatters it back as ambient
 
 	// Lit the texture with various things
 	cTex.rgb *= cL * 2.0f + (cA + cDiffLocal + Const.cAmbient * Const.Ambient) * saturate(1.0f + fG + fZ) + cNgt;
@@ -733,7 +1113,7 @@ float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
 	cTex.rgb += cRfl * 0.75f;
 
 	// Add Specular component
-	cTex.rgb += cSun * fSpe * smoothstep(-0.001f, 0.03f, fDPS) * (1.0f - gStorm);   // ORO patch (s) part 2
+	cTex.rgb += cSun * fSpe * smoothstep(-0.001f, 0.03f, fDPS) * (1.0f - gStorm) * fogSun;   // ORO patch (s) part 2 + (aa)
 
 	// Amplify cloud shadows for orbital views
 	float fOrbShd = 1.0f - (1.0f - fShd) * Const.CamSpace * 0.5f;
@@ -896,20 +1276,15 @@ float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
 	cTex.rgb *= sct.atn.rgb;
 	cTex.rgb += (sct.ray.rgb * RayPhase(-fDRS) + sct.mie.rgb * MiePhase(-fDRS)) * fOrbShd * (1.0f + fNoise);
 
-	// ORO patch (s) part 2: STORM FOG. Visibility collapses under heavy rain; exponential
-	// in the pixel distance (dst), toward a grey scaled by the ambient daylight factor so
-	// it stays dark at night. Sits after the atmospheric haze - storm fog dominates it -
-	// and before the eclipse, which still darkens everything. Zero at gStorm 0.
-	if (gStorm > 0.001f) {
-		float  ffog = (1.0f - exp(-dst * 0.00045f)) * saturate(gStorm * 1.4f);
-		float3 cFog = float3(0.40f, 0.43f, 0.47f) * saturate(cAmb.a * 1.2f);
-		cTex.rgb = lerp(cTex.rgb, cFog, ffog);
-	}
+	// ORO patch (aa): the storm fog that lived here (patch (s) part 2) is the unified
+	// fog's layer 1 now - the addon drives it from the storm - and it goes on LAST, on the
+	// final colour, so the ground and the hull standing on it fog to the same grey.
 
 	cTex.rgb *= fECL;	// Apply eclipse
 	cTex.rgb += cNgt2;
 
-	return float4(HDR(cTex.rgb), 1.0f);
+	// ORO patch (aa): the fog on the FINAL colour, after the tone curve.
+	return float4(lerp(HDR(cTex.rgb), cFog, 1.0f - fogT), 1.0f);
 #endif
 }
 
@@ -989,6 +1364,10 @@ float4 CloudPS(CldVS frg) : COLOR
 	float fPxA = fPxR - Const.PlanetRad;			// Pixel altitude
 
 	if (!Flow.bBelowClouds) fPxA = Const.CloudAlt;
+
+	// ORO patch (aa): the fog between the camera and the cloud layer (the crossing, from below)
+	float  fogT = 1.0f, fogSun = 1.0f; float3 cFog = 0;
+	OroFog(frg.posW, Const.toSun, fogT, fogSun, cFog);
 
 
 	// -----------------------------------------------
@@ -1080,7 +1459,7 @@ float4 CloudPS(CldVS frg) : COLOR
 		cTex.rgb += sct.ray.rgb * 2.0f;
 		cTex.rgb *= fECL;
 
-		return float4(HDR(cTex.rgb), saturate(cTex.a));
+		return float4(lerp(HDR(cTex.rgb), cFog, 1.0f - fogT), saturate(cTex.a));   // ORO patch (aa)
 	}
 	else {
 
@@ -1103,7 +1482,7 @@ float4 CloudPS(CldVS frg) : COLOR
 		// ORO patch (m): stock was cTex.a * cAmb.a * cAmb.a - alpha 0 past the
 		// terminator, night clouds invisible from above. See the note at CloudVS.
 		float fNight = ORO_NIGHT_CLOUD + (1.0f - ORO_NIGHT_CLOUD) * cAmb.a * cAmb.a;
-		return float4(sqr(HDR(cTex.rgb * 4.0f)), cTex.a * fNight);
+		return float4(lerp(sqr(HDR(cTex.rgb * 4.0f)), cFog, 1.0f - fogT), cTex.a * fNight);   // ORO patch (aa)
 	}
 }
 

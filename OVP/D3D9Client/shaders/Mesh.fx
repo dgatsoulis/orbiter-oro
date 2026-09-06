@@ -207,10 +207,20 @@ float4 BaseTilePS(float4 sc : VPOS, TileMeshVS frg) : COLOR
 	float  dstB = length(frg.CamW);           // frg.CamW is the raw camera-relative vector
 	                                          // (the normalized copy is the local CamW), so
 	                                          // its length is the pixel-camera distance
-	float3 ambE = gSun.Ambient * (1.0f + gStorm * 1.8f);
-	float3 clr = cTex.rgb * saturate((d + s) * gSun.Color * (1.0f - gStorm) + ambE);
+	// ORO patch (aa): the fog, up front - it attenuates the sun and lifts the ambient.
+	float  fogT = 1.0f, fogSun = 1.0f; float3 cFog = 0;
+	OroFog(-frg.CamW, -gSun.Dir, fogT, fogSun, cFog);
+	// ORO patch (aa): SNOW COVER - dormant at gSnow.x 0
+	[branch] if (gSnow.x > 0.0f)
+		cTex.rgb = lerp(cTex.rgb, ORO_SNOW_ALBEDO, OroSnowMask(nrmW, gFogCam.xyz, 1e9f, frg.tex0 * 48.0f));
+	float3 ambE = gSun.Ambient * (1.0f + gStorm * 1.8f) * (1.0f + gFogLift * (1.0f - fogSun));
+	float  fCasc = 1.0f;
+#if defined(_CASCADE)
+	fCasc = OroCascadeShadow(-frg.CamW, nrmW, -gSun.Dir);   // ORO patch (ae): the world's shadows on the apron
+#endif
+	float3 clr = cTex.rgb * saturate((d + s) * gSun.Color * (1.0f - gStorm) * fogSun * fCasc + ambE);
 
-	if (gNight) clr += tex2D(Tex1S, frg.tex0).rgb;
+	if (gNight) clr += tex2D(Tex1S, frg.tex0).rgb * gBaseGlow;   // ORO patch (ac): the runway markings' night layer
 
 	// ------------------------------------------------------------------------
 	// ORO patch (s): WET GROUND. Everything below is exactly zero at gSurfWet 0, so
@@ -384,7 +394,7 @@ float4 BaseTilePS(float4 sc : VPOS, TileMeshVS frg) : COLOR
 		// Round 3: now storm-collapsed like every directional term (it previously rode
 		// the RAW diffuse dot and survived full overcast) - the broad glare below is
 		// what replaces it under the deck.
-		float gl = pow(saturate(dot(r, CamW)), 90.0f) * d * (1.0f - gStorm)
+		float gl = pow(saturate(dot(r, CamW)), 90.0f) * d * (1.0f - gStorm) * fogSun   // ORO patch (aa)
 		         * (0.7f * wet + 2.4f * pud);
 		clr += gSun.Color * gl;
 		// POOL SKY GLARE (part 7 round 3, his ask): a BROAD view-dependent lobe - the
@@ -395,16 +405,10 @@ float4 BaseTilePS(float4 sc : VPOS, TileMeshVS frg) : COLOR
 		clr += cSky * glb * (0.30f * wet + 1.10f * pud);
 	}
 
-	// ORO patch (s) part 2: STORM FOG. Rain scatters light, so visibility collapses and
-	// the crisp bright horizon goes with it. Exponential in the pixel distance, toward the
-	// lifted-ambient grey, so the fog is the same colour as the light. Zero at gStorm 0.
-	if (gStorm > 0.001f) {
-		float  ff = (1.0f - exp(-dstB * 0.00045f)) * saturate(gStorm * 1.4f);
-		float3 cFog = saturate(ambE * 2.2f + gSun.Color * 0.06f);
-		clr = lerp(clr, cFog, ff);
-	}
-
-	return float4(clr.rgb*frg.atten.rgb+frg.insca.rgb, cTex.a);
+	// ORO patch (aa): the storm fog that lived here (patch (s) part 2) is the unified
+	// fog's layer 1 now, driven by the addon from the storm; the fog goes on LAST, on
+	// the final colour, the same display-space grey the terrain and the hulls use.
+	return float4(lerp(clr.rgb*frg.atten.rgb+frg.insca.rgb, cFog, 1.0f - fogT), cTex.a);
 	//return float4(clr.rgb*frg.atten.rgb+frg.insca.rgb, cTex.a*(1-frg.insca.a));	// Make basetiles transparent during night
 }
 
@@ -468,6 +472,7 @@ ShadowTexVS ShadowMeshTechVS(POSTEX vrt)
 	outVS.posH  = mul(float4(posW, 1.0f), gVP);
 	outVS.tex0  = float3(vrt.tex0.xy, alpha);
 	outVS.dstW  = outVS.posH.zw;
+	outVS.dist  = length(posW);	// ORO patch (ab)
 	return outVS;
 }
 
@@ -481,15 +486,41 @@ ShadowTexVS ShadowMeshTechExVS(POSTEX vrt)
 	outVS.posH  = mul(float4(posW, 1.0f), gVP);
 	outVS.tex0  = float3(vrt.tex0.xy, alpha);
 	outVS.dstW  = outVS.posH.zw;
+	outVS.dist  = length(posW);	// ORO patch (ab)
 	return outVS;
 }
 
-float4 ShadowTechPS(ShadowTexVS frg) : COLOR
+float4 ShadowTechPS(float4 sc : VPOS, ShadowTexVS frg) : COLOR
 {
 	if (frg.tex0.b < 0) clip(-1);
 	if (gOITEnable) {
 		float4 alpha = tex2D(WrapS, frg.tex0.xy);
 		if (alpha.a < 0.5f) clip(-1);
+	}
+	// ORO patch (ab): THE SOFT DEPTH TEST. The sheet is the mesh projected onto ONE flat
+	// plane, so it sits metres under every bump and floats over every dip - a hardware
+	// z-test clips it at every bump (flown 2026-09-01, reverted). Now that the terrain
+	// writes GBUF_DEPTH, this asks HOW FAR behind the scene the sheet is: a bump under
+	// it is metres and passes; a hill (or a hull, or a hangar) between it and the eye
+	// is tens to hundreds and hides it. Tolerance = base + k * distance, pushed by
+	// Scene.cpp after the depth pass and zero while the buffer is stale (probes).
+	[branch] if (gSceneDepthPrm.z > 0.0f) {
+		float2 duv = (sc.xy + 0.5f) * gSceneDepthPrm.xy;
+		float  sd  = tex2Dlod(SceneDepthS, float4(duv, 0, 0)).a;   // explicit LOD: a fetch inside [branch] may not use gradients
+		bool   hit = (sd > 0.1f && frg.dist > sd + gSceneDepthPrm.z + gSceneDepthPrm.w * sd);
+		// ORO patch (ab) INSTRUMENT (2026-09-06, flight one of the shadow rewrite): with
+		// ShadowDebug set, the sheet is COLOURED by the verdict instead of clipped, so a
+		// screenshot shows which branch a blinking shadow took. Mode 1: green = no depth
+		// under it, red = clipped, blue = passed. Mode 2: red = the scene depth is NEARER
+		// than the sheet, blue = farther, brightness = |difference| / 4 m.
+		[branch] if (gOroDbg > 0.5f) {
+			if (sd <= 0.1f) return float4(0.0f, 1.0f, 0.0f, 0.75f);
+			if (gOroDbg < 1.5f) return hit ? float4(1.0f, 0.0f, 0.0f, 0.75f) : float4(0.0f, 0.3f, 1.0f, 0.75f);
+			float df = frg.dist - sd;                     // + = the sheet lies behind the scene
+			float m  = 0.15f + 0.85f * saturate(abs(df) / 4.0f);
+			return (df > 0.0f) ? float4(m, 0.0f, 0.0f, 0.75f) : float4(0.0f, 0.0f, m, 0.75f);
+		}
+		if (hit) clip(-1);
 	}
 	return float4(0.0f, 0.0f, 0.0f, gMix);
 }
@@ -575,6 +606,10 @@ technique ShadowTech
 		BlendOp = Add;
 		SrcBlend = SrcAlpha;
 		DestBlend = InvSrcAlpha;
+		// ORO patch (ab): the hardware z-test stays OFF - a depth-tested variant was
+		// flown 2026-09-01 and reverted (the flat sheet clipped under every bump).
+		// The occlusion is a SOFT test in ShadowTechPS against GBUF_DEPTH instead,
+		// possible now that the terrain writes that buffer.
 		ZEnable = false;
 		ZWriteEnable = false;
 
@@ -594,6 +629,10 @@ technique ShadowTech
 		BlendOp = Add;
 		SrcBlend = SrcAlpha;
 		DestBlend = InvSrcAlpha;
+		// ORO patch (ab): the hardware z-test stays OFF - a depth-tested variant was
+		// flown 2026-09-01 and reverted (the flat sheet clipped under every bump).
+		// The occlusion is a SOFT test in ShadowTechPS against GBUF_DEPTH instead,
+		// possible now that the terrain writes that buffer.
 		ZEnable = false;
 		ZWriteEnable = false;
 
@@ -711,7 +750,14 @@ technique BaseTileTech
 		BlendOp = Add;
 		SrcBlend = SrcAlpha;
 		DestBlend = InvSrcAlpha;
-		ZEnable = false;
+		// ORO patch (z): base tiles obey the depth buffer. ZEnable=false is a
+		// fossil of the flat-planet era (nothing could stand between camera and
+		// runway, and depth-off dodged z-fighting with the coplanar ground);
+		// with terrain elevation a RUNWAY painted through a mountain is the
+		// visible symptom - a stock bug, reproducible with no addon loaded.
+		// The terrain writes real depth at close range, so the test is valid;
+		// ZWrite stays off, exactly as before.
+		ZEnable = true;
 		ZWriteEnable = false;
 		CullMode = CCW;
 	}

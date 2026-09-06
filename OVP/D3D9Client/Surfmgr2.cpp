@@ -394,7 +394,12 @@ INT16 *SurfTile::ReadElevationFile (const char *name, int lvl, int ilat, int iln
 				smgr->ZTreeManager(3)->ReleaseData(buf);
 			}
 		}
-		if (Config->bFlats) FilterElevationGraphics(mgr->GetPlanet()->Object(), lvl - 4, ilat, ilng, elev);
+		if (Config->bFlats) {
+			FilterElevationGraphics(mgr->GetPlanet()->Object(), lvl - 4, ilat, ilng, elev);
+			// ORO patch (af): the RAW array too - what the CUBIC mode's file-less children
+			// interpolate from (see FilterElevationFile). Same level, same resolution.
+			FilterElevationFile(mgr->GetPlanet()->Object(), lvl - 4, ilat, ilng, tgt_res, e);
+		}
 	}
 	return e;
 }
@@ -818,6 +823,25 @@ void SurfTile::Render ()
 	D3DXVECTOR3 bs_pos;
 	D3DXVec3TransformCoord(&bs_pos, &mesh->bsCnt, &mWorld);
 
+	// ORO patch (z3) round 2c: a tile near the shadowed local light registers as a
+	// CASTER for the NEXT frame's map. Deliberately independent of this tile's own
+	// lighting (fc->bLocals) - a ridge FACING AWAY from the beam receives nothing
+	// and must still block it. Main scene only, or mirror/probe passes double-add.
+	if (scene->GetRenderPass() == RENDERPASS_MAINSCENE) {
+		bool want = false;
+		const Scene::LOCALSHADOWPARAM* lsq = scene->GetLocalShadowData();
+		if (lsq->idx >= 0) {
+			D3DXVECTOR3 lrel = bs_pos - lsq->pos;
+			if (D3DXVec3Length(&lrel) < lsq->range + mesh->bsRad) want = true;
+		}
+		// ORO patch (ab): and every tile within the depth pass's reach (terrain into
+		// GBUF_DEPTH - Scene.cpp). 60 km covers every hill a shadow, a glare or an
+		// addon effect can stand behind at ground level; from orbit nothing registers.
+		if (scene->WantsTerrainDepth() && D3DXVec3Length(&bs_pos) < 60000.0f + mesh->bsRad) want = true;
+		if (want)
+			scene->RegisterLclShadowTile(mesh->pVB, mesh->pIB, mesh->nv, mesh->nf, &mWorld, &bs_pos, mesh->bsRad, smgr->GetPlanet()->Object());   // ORO patch (ab) round 3: + the planet
+	}
+
 	// ----------------------------------------------------------------------
 	// Assign micro texture range information to shaders 
 	// ----------------------------------------------------------------------
@@ -1023,7 +1047,9 @@ void SurfTile::Render ()
 			}
 		}
 
-		pShader->SetTexture(pShader->tShadowMap, shd->pShadowMap);
+		// ORO patch (ae): mode 3 binds the cascade atlas here instead of the focus map
+		if (Config->TerrainShadowing == 3 && scene->CascadesLive()) pShader->SetTexture(pShader->tShadowMap, scene->GetCascadeAtlas(), IPF_CLAMP | IPF_POINT);
+		else pShader->SetTexture(pShader->tShadowMap, shd->pShadowMap);
 	}
 
 	// ---------------------------------------------------------------------
@@ -1034,6 +1060,7 @@ void SurfTile::Render ()
 
 	LightF Locals;
 	BOOL Spots[4];
+	int lsSlot = -1;	// ORO patch (z3): which of THIS TILE's four light slots is the shadow-mapped one
 
 	if (cfg != PLT_GIANT)
 	{
@@ -1076,6 +1103,17 @@ void SurfTile::Render ()
 					nMeshLights = min(nMeshLights, 4);
 
 					// Create a list of N most effective lights ---------------------------------------------
+					// ORO patch (z3): each tile picks its own four, so the frame's
+					// shadow-mapped scene light lands in a DIFFERENT slot per tile
+					// (or in none) - match by scene index here, where both are known.
+					const Scene::LOCALSHADOWPARAM* lsp = scene->GetLocalShadowData();
+					// ORO patch (ae) round 8: in mode 3 the local map sits IN the cascade
+					// atlas (Scene::RenderCascadeShadows), so the terrain samples it
+					// beside the sun's cascades with no slot borrowed - and no day gate.
+					// Main scene only: a probe's constants carry no atlas (vCascAtlas
+					// pushes dead there), so a probe keeps the borrow path below.
+					const bool viaAtlas = (Config->TerrainShadowing == 3) && scene->CascadesLive() && scene->CascadeHasLocal()
+					                   && (scene->GetRenderPass() == RENDERPASS_MAINSCENE);
 					for (int i = 0; i < nMeshLights; i++)
 					{
 						auto pL = pLights[LightList[i].idx];
@@ -1085,6 +1123,12 @@ void SurfTile::Render ()
 						Locals.param[i] = pL.Param;
 						Locals.position[i] = pL.Position;
 						Spots[i] = (pL.Type == 1);
+						// terrainOK (2026-09-05, the day split): in daylight the map
+						// still builds and vessels receive, but the TERRAIN slot
+						// borrow stays night-only - it evicts the sun map, and losing
+						// the vessel's sun shadow in daylight is the flown regression
+						// the old whole-system gate existed for.
+						if ((lsp->terrainOK || viaAtlas) && LightList[i].idx == lsp->idx) lsSlot = i;
 					}
 
 					// Enable local lights and feed data to shader
@@ -1116,6 +1160,9 @@ void SurfTile::Render ()
 		pShader->SetPSConstants("gWet", &fWet, sizeof(float));
 		pShader->SetPSConstants("gStorm", &fStm, sizeof(float));
 		pShader->SetPSConstants("gWetDark", &fWd, sizeof(float));
+		// ORO patch (aa): the fog + snow constants, by name - the FOURTH push site of a
+		// value the terrain must see (D3D9Effect serves tiles and hulls, this the ground).
+		{ extern void OroFogPushPS(ShaderClass* pShader); OroFogPushPS(pShader); }
 
 		// ORO patch (s) part 6: the planar mirror, for the TERRAIN this time. Round 1 put
 		// the reflection in the base-tile shader alone - and the ground a vessel parks on
@@ -1156,6 +1203,37 @@ void SurfTile::Render ()
 	{
 		pShader->SetPSConstants(pShader->Lights, &Locals, sizeof(Locals));
 		pShader->SetPSConstants(pShader->Spotlight, Spots, sizeof(Spots));
+
+		// ORO patch (z3): hand the tile the local-light shadow map. Constants set BY
+		// NAME rather than growing the mirrored ShaderParams struct - the patch (s)
+		// rule. vLShd.x is the slot (-1 = no shadowed light on this tile) and must be
+		// written EVERY tile, or a tile outside the beam inherits its neighbour's.
+		// ⚠️ THE MAP RIDES THE tShadowMap SLOT: the Earth config with _DEVTOOLS sits
+		// at EXACTLY ps_3_0's 16-sampler ceiling in stock (X4510 with a 17th sampler,
+		// flown), so a tile with a shadowed local light REBINDS tShadowMap to the
+		// local map and yields its sun-map shadow (bShadows off) for the frame - a
+		// beam-lit tile, which matters at night, where the sun term is ~0 anyway.
+		// This runs AFTER the sun's own bind above and BEFORE the Flow upload below,
+		// so both the binding and the flag land in the right order.
+		{
+			const Scene::LOCALSHADOWPARAM* lsp = scene->GetLocalShadowData();
+			FVECTOR4 lv((float)lsSlot, 0.0f, 0.0f, 0.0f);
+			if (lsSlot >= 0) {
+				lv.y = 1.0f / (float)lsp->size;
+				lv.z = lsp->texel;		// the normal-offset + footprint-bias scale
+				lv.w = lsp->kdepth;		// metres-along-ray -> 1-z/w units
+				pShader->SetPSConstants("mLsVP", (void*)&lsp->mViewProj, sizeof(D3DXMATRIX));
+				// round 8: with the map in the atlas (mode 3, main scene) the slot stays
+				// the atlas' and the sun keeps its shadow; the shader reads the cell
+				const bool viaAtlas = (Config->TerrainShadowing == 3) && scene->CascadesLive() && scene->CascadeHasLocal()
+				                   && (scene->GetRenderPass() == RENDERPASS_MAINSCENE);
+				if (!viaAtlas) {
+					pShader->SetTexture(pShader->tShadowMap, lsp->pShadowMap, IPF_CLAMP | IPF_LINEAR);
+					fc->bShadows = false;
+				}
+			}
+			pShader->SetPSConstants("vLShd", &lv, sizeof(lv));
+		}
 	}
 
 	pShader->UpdateTextures();
@@ -1451,6 +1529,18 @@ void TileManager2<SurfTile>::Render (MATRIX4 &dwmat, bool use_zbuf, const vPlane
 
 	pShader->ClearTextures();
 	pShader->Setup(pPatchVertexDecl, bUseZ, 0);
+	// ORO patch (ae): the cascade atlas parameters, once per planet render. Live only in
+	// the MAIN scene - a probe's world is another camera's, and the atlas is this one's.
+	if (pShader->bShdMap) {
+		D3DXVECTOR4 basis[3], A[9], tx[3], split, atl;
+		const bool live = (Config->TerrainShadowing == 3) && scene->CascadesLive() && (scene->GetRenderPass() == RENDERPASS_MAINSCENE);
+		scene->GetCascadeConstants(basis, A, tx, &split, &atl, live);
+		pShader->SetPSConstants("vCascBasis", basis, sizeof(basis));
+		pShader->SetPSConstants("vCascA", A, sizeof(A));
+		pShader->SetPSConstants("vCascTx", tx, sizeof(tx));
+		pShader->SetPSConstants("vCascSplit", &split, sizeof(split));
+		pShader->SetPSConstants("vCascAtlas", &atl, sizeof(atl));
+	}
 	pShader->GetDevice()->SetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);
 
 	ShaderParams* sp = vp->GetTerrainParams();

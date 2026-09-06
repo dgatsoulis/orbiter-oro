@@ -56,6 +56,7 @@ public:
 	void RenderRunwayLights (LPDIRECT3DDEVICE9 dev);
 	bool RenderSurface (LPDIRECT3DDEVICE9 dev);
 	bool RenderStructures (LPDIRECT3DDEVICE9 dev);
+	bool RenderStructureDepth (const LPD3DXMATRIX pVP, int opt = 1);   // ORO patch (z2): opt 1 = GBUF_DEPTH; (z3): opt 0 = a light's shadow map
 	void RenderGroundShadow (LPDIRECT3DDEVICE9 dev, float alpha);
 
 	const SurftileSpec *GetTileDesc() const { return tspec; }

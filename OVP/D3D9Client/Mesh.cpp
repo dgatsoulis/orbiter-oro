@@ -179,6 +179,31 @@ void MeshBuffer::Map(LPDIRECT3DDEVICE9 pDev)
 // ======================================================================================
 //
 // ===========================================================================================
+// ORO patch (ad): THE CABIN AT NIGHT (2026-09-05, his ask: "if the sun is down we get the
+// stock Orbiter view of the VC - all surfaces are lit up by the textures"). What lights a
+// stock VC at midnight is not the sun: the stock DeltaGlider's cabin materials carry a flat
+// EMISSIVE 0.8 (dgint1_*, dgip1_*, LIT_SURF...) - an author's night fill, not a lamp - and
+// the Launchpad ambient sits on top. Scene's cockpit bracket raises this scale for the VC
+// draw only; the material push below folds it into the emissive of every material that is
+// NOT a display. A DISPLAY is a black-diffuse material (the DG's `instrument` / `inst1_6`:
+// diffuse 0, emissive 1 - emissive is its whole picture and no lamp could ever light it),
+// and MFD-screen groups never come through here at all. Emission MAPS ride
+// gMtrl.emission2 and are untouched; local light emitters are untouched - which is the
+// point: a cockpit floodlight finally has something to do.
+float g_oroVCNightNow = 1.0f;
+static D3D9MatExt s_oroNightMat;
+static const D3D9MatExt* OroVCNightMat(const D3D9MatExt* mat)
+{
+	if (g_oroVCNightNow >= 0.999f) return mat;
+	float dmax = mat->Diffuse.x;
+	if (mat->Diffuse.y > dmax) dmax = mat->Diffuse.y;
+	if (mat->Diffuse.z > dmax) dmax = mat->Diffuse.z;
+	if (dmax < 0.05f) return mat;                    // a display: its emissive IS the picture
+	s_oroNightMat = *mat;
+	s_oroNightMat.Emissive *= g_oroVCNightNow;
+	return &s_oroNightMat;
+}
+
 // ORO patch (h) part 2 - THE RAIN-GLASS STORE (2026-08-26, his design: "we want this to
 // work for ANY vessel that has a VC mesh group with RAIN 1").
 //
@@ -200,8 +225,13 @@ void MeshBuffer::Map(LPDIRECT3DDEVICE9 pDev)
 // Meshes never preloaded (per-instance oapiLoadMesh copies) have no filename to scan and
 // simply get no rain - the documented limitation, and VC meshes are preloaded by
 // convention. Cleared with the mesh manager at session close: template handles recycle.
+// Part 4 (2026-09-02): each entry also keeps the mesh NAME - even entries with no
+// declared groups - so RainGlassReload can recompute the whole store mid-session and
+// hand every LIVE mesh a fresh list. Without the kept names a cfg line added for a
+// mesh that had nothing before could never find its way in until the next session.
 // ===========================================================================================
-static std::map<MESHHANDLE, std::vector<WORD> > g_rainGlassStore;
+struct RainStoreEnt { std::vector<WORD> grps; char name[192]; };
+static std::map<MESHHANDLE, RainStoreEnt> g_rainGlassStore;
 
 // ORO patch (v): the per-probe box-projection table - see Mesh.h.
 D3D9Mesh::ENVPRB D3D9Mesh::sEnvPrb[4] = {};
@@ -262,64 +292,197 @@ static void PushRflPlane(int idx1)
 	else D3D9Effect::FX->SetVector(D3D9Effect::ePlnCtl, &off);
 }
 
+// ORO patch (h) part 3: the NO-MESH-EDIT declaration route. Beside the in-mesh
+// RAIN 1 tokens, `Config\ORO\VesselsRainSurfaces.cfg` lists "<meshname> <group>"
+// pairs - authored by ORO's in-panel RAINSURFACES picker, so a user can declare
+// a window by CLICKING it instead of editing a mesh file (and the shipped cfg is
+// how stock vessels get windscreen drops with no stock mesh in the package).
+// The mesh name key is the same string clbkStoreMeshPersistent speaks and
+// D3D9Mesh carries, so all three sides agree by construction. Loaded once and
+// cached (the flag resets with the store at session close, and part 4's
+// RainGlassReload resets it too - the picker's SAVE applies LIVE through that).
+static struct { char mesh[192]; WORD grp; } g_rainCfg[256];
+static int  g_rainCfgN = -1;   // -1 = not loaded this session
+
+static void RainCfgMerge(const char *fname, std::vector<WORD> &grps)
+{
+	if (g_rainCfgN < 0) {
+		g_rainCfgN = 0;
+		FILE *cf = NULL;
+		if (fopen_s(&cf, "Config\\ORO\\VesselsRainSurfaces.cfg", "rt") == 0 && cf) {
+			char ln[300];
+			while (fgets(ln, sizeof(ln), cf) && g_rainCfgN < 256) {
+				if (ln[0] == ';' || ln[0] == '\r' || ln[0] == '\n' || ln[0] == 0) continue;
+				char name[192]; int g = -1;
+				if (sscanf_s(ln, "%191s %d", name, (unsigned)_countof(name), &g) == 2 && g >= 0 && g <= 0xFFFF) {
+					strcpy_s(g_rainCfg[g_rainCfgN].mesh, name);
+					g_rainCfg[g_rainCfgN].grp = (WORD)g;
+					g_rainCfgN++;
+				}
+			}
+			fclose(cf);
+			if (g_rainCfgN)
+				oapiWriteLogV("D3D9: rain glass - %d declared surface(s) in VesselsRainSurfaces.cfg.", g_rainCfgN);
+		}
+	}
+	for (int i = 0; i < g_rainCfgN; i++) {
+		if (_stricmp(g_rainCfg[i].mesh, fname)) continue;
+		bool dup = false;
+		for (size_t j = 0; j < grps.size(); j++) if (grps[j] == g_rainCfg[i].grp) { dup = true; break; }
+		if (!dup) grps.push_back(g_rainCfg[i].grp);
+	}
+}
+
 void RainGlassClearStore()
 {
+	extern void RainFlashClear();
 	g_rainGlassStore.clear();
+	g_rainCfgN = -1;    // re-read the cfg next session (or at part 4's live reload)
+	RainFlashClear();   // a flash must not survive into a session with recycled pointers
+}
+
+// The in-mesh RAIN-token half of a mesh's declaration, split out (part 4) so the
+// live reload can recompute it without going through clbkStoreMeshPersistent.
+static void RainTokenScan(const char *fname, std::vector<WORD> &grps)
+{
+	char path[MAX_PATH];
+	sprintf_s(path, "%s\\%s.msh", OapiExtension::GetMeshDir(), fname);
+	FILE *f = NULL;
+	if (fopen_s(&f, path, "rb") == 0 && f) {
+		// Stage 1: is the literal token anywhere in the file? Chunked, with a 3-byte carry
+		// so a token straddling a chunk boundary cannot hide.
+		bool found = false;
+		{
+			char buf[65536 + 4]; size_t carry = 0, n;
+			while (!found && (n = fread(buf + carry, 1, sizeof(buf) - carry - 1, f)) > 0) {
+				buf[carry + n] = 0;
+				if (strstr(buf, "RAIN")) { found = true; break; }
+				const size_t tot = carry + n;
+				carry = (tot >= 3) ? 3 : tot;
+				memmove(buf, buf + tot - carry, carry);
+			}
+		}
+		if (found) {
+			// Stage 2: the precise walk. Vertex/index lines start with digits or a sign, so the
+			// two token tests cannot misfire inside geometry data.
+			fseek(f, 0, SEEK_SET);
+			char line[256]; int geom = 0; bool pend = false;
+			while (fgets(line, sizeof(line), f)) {
+				if (strncmp(line, "RAIN", 4) == 0) {
+					int on = 0;
+					pend = (sscanf_s(line + 4, "%d", &on) == 1 && on != 0);
+				}
+				else if (_strnicmp(line, "GEOM", 4) == 0) {
+					if (pend && geom <= 0xFFFF) grps.push_back((WORD)geom);
+					pend = false; geom++;
+				}
+			}
+		}
+		fclose(f);
+	}
 }
 
 void RainGlassStoreScan(MESHHANDLE hMesh, const char *fname)
 {
 	if (!hMesh || !fname || !fname[0]) return;
 
-	char path[MAX_PATH];
-	sprintf_s(path, "%s\\%s.msh", OapiExtension::GetMeshDir(), fname);
-	FILE *f = NULL;
-	if (fopen_s(&f, path, "rb") != 0 || !f) return;
-
-	// Stage 1: is the literal token anywhere in the file? Chunked, with a 3-byte carry
-	// so a token straddling a chunk boundary cannot hide.
-	bool found = false;
-	{
-		char buf[65536 + 4]; size_t carry = 0, n;
-		while (!found && (n = fread(buf + carry, 1, sizeof(buf) - carry - 1, f)) > 0) {
-			buf[carry + n] = 0;
-			if (strstr(buf, "RAIN")) { found = true; break; }
-			const size_t tot = carry + n;
-			carry = (tot >= 3) ? 3 : tot;
-			memmove(buf, buf + tot - carry, carry);
-		}
-	}
-	if (!found) { fclose(f); return; }
-
-	// Stage 2: the precise walk. Vertex/index lines start with digits or a sign, so the
-	// two token tests cannot misfire inside geometry data.
-	fseek(f, 0, SEEK_SET);
 	std::vector<WORD> grps;
-	char line[256]; int geom = 0; bool pend = false;
-	while (fgets(line, sizeof(line), f)) {
-		if (strncmp(line, "RAIN", 4) == 0) {
-			int on = 0;
-			pend = (sscanf_s(line + 4, "%d", &on) == 1 && on != 0);
-		}
-		else if (_strnicmp(line, "GEOM", 4) == 0) {
-			if (pend && geom <= 0xFFFF) grps.push_back((WORD)geom);
-			pend = false; geom++;
-		}
-	}
-	fclose(f);
+	RainTokenScan(fname, grps);
+
+	// The cfg-declared groups join the token-declared ones (part 3).
+	RainCfgMerge(fname, grps);
+
+	// Part 4: keep the entry (with its NAME) even when no groups are declared - the
+	// erase-on-empty this replaces made a later cfg line for this mesh unreachable
+	// until the next session. An empty entry answers Lookup with NULL exactly as a
+	// missing one did, so construction behaviour is unchanged.
+	RainStoreEnt &e = g_rainGlassStore[hMesh];
+	e.grps = grps;
+	strcpy_s(e.name, fname);
 
 	if (!grps.empty()) {
-		g_rainGlassStore[hMesh] = grps;
 		// Into Orbiter.log deliberately - it is the log the addon's users are read from.
-		oapiWriteLogV("D3D9: rain glass - %d RAIN group(s) in %s.", (int)grps.size(), fname);
+		oapiWriteLogV("D3D9: rain glass - %d group(s) for %s.", (int)grps.size(), fname);
 	}
-	else g_rainGlassStore.erase(hMesh);   // a re-store after the author removed the tokens
 }
 
 static const std::vector<WORD>* RainGlassLookup(MESHHANDLE hMesh)
 {
-	std::map<MESHHANDLE, std::vector<WORD> >::const_iterator it = g_rainGlassStore.find(hMesh);
-	return (it == g_rainGlassStore.end()) ? NULL : &it->second;
+	std::map<MESHHANDLE, RainStoreEnt>::const_iterator it = g_rainGlassStore.find(hMesh);
+	return (it == g_rainGlassStore.end() || it->second.grps.empty()) ? NULL : &it->second.grps;
+}
+
+// ===========================================================================================
+// ORO patch (h) part 4 (2026-09-02, his ask: "display the raindrops on the fly") - LIVE
+// RE-APPLICATION. The picker's SAVE used to need a scenario reload because every D3D9Mesh
+// copies its rain list at CONSTRUCTION. This re-reads the cfg, recomputes every STORE
+// entry from its kept name (so future instances inherit the new truth), then hands every
+// LIVE mesh in the catalog its fresh list by NAME match - the NORMAL_DEPTH pass reads the
+// list per frame, so the drops respond on the very next one. Click-driven (the picker's
+// SAVE), so the mesh-file rescans are a one-time hitch, never a per-frame cost.
+// ===========================================================================================
+void RainGlassReload()
+{
+	g_rainCfgN = -1;                       // the next merge re-reads the cfg
+	for (std::map<MESHHANDLE, RainStoreEnt>::iterator it = g_rainGlassStore.begin();
+	     it != g_rainGlassStore.end(); ++it) {
+		it->second.grps.clear();
+		RainTokenScan(it->second.name, it->second.grps);
+		RainCfgMerge(it->second.name, it->second.grps);
+	}
+	int live = 0;
+	for (std::set<D3D9Mesh*>::const_iterator im = MeshCatalog.begin(); im != MeshCatalog.end(); ++im) {
+		const char *n = (*im)->GetName();
+		if (!n || !n[0]) continue;
+		for (std::map<MESHHANDLE, RainStoreEnt>::const_iterator it = g_rainGlassStore.begin();
+		     it != g_rainGlassStore.end(); ++it) {
+			if (_stricmp(it->second.name, n) == 0) { (*im)->SetRainGroups(it->second.grps); live++; break; }
+		}
+	}
+	oapiWriteLogV("D3D9: rain glass - declarations re-applied live (%d cfg entries, %d mesh(es) touched).",
+	              g_rainCfgN < 0 ? 0 : g_rainCfgN, live);
+}
+
+// The pick-confirmation highlight (part 4's second half, his spec 2026-09-02: "light up
+// green and STAY lit as long as the user is pressing the mouse button" - the Debug
+// dialog's own behaviour): the RAINSURFACES picker's accepted click paints its group in
+// the group highlighter's green, held while the button is down. msec > 0 gives a timed
+// highlight instead (kept for generality); msec <= 0 is the held mode ORO uses. The held
+// mode reads the PHYSICAL button state rather than waiting for a WM_LBUTTONUP, so a
+// release outside the window clears it just the same; the timer is only a backstop. One
+// (mesh, group) at a time; the dtor and the session-close clear stand a dangling pointer
+// down before it can matter.
+static D3D9Mesh* g_rainFlashMesh  = NULL;
+static int       g_rainFlashGrp   = -1;
+static DWORD     g_rainFlashUntil = 0;
+static bool      g_rainFlashHold  = false;   // lit while the mouse button is down
+
+void RainFlashGroup(MESHHANDLE hMesh, int grp, int msec)
+{
+	D3D9Mesh* pM = (D3D9Mesh*)hMesh;
+	if (!pM || MeshCatalog.count(pM) == 0) return;   // a stale handle must not arm a dangling highlight
+	g_rainFlashMesh  = pM;
+	g_rainFlashGrp   = grp;
+	g_rainFlashHold  = (msec <= 0);
+	g_rainFlashUntil = GetTickCount() + (DWORD)(msec > 0 ? msec : 60000);  // held: backstop only
+}
+
+bool RainFlashActive(const D3D9Mesh* pM)
+{
+	if (pM != g_rainFlashMesh) return false;
+	if (GetTickCount() >= g_rainFlashUntil) { g_rainFlashMesh = NULL; return false; }
+	if (g_rainFlashHold) {
+		// The pick arrives on the DOWN of the same press, so "still held" is exactly
+		// the button that made it. SM_SWAPBUTTON keeps a swapped-buttons mouse honest.
+		const int vk = GetSystemMetrics(SM_SWAPBUTTON) ? VK_RBUTTON : VK_LBUTTON;
+		if (!(GetAsyncKeyState(vk) & 0x8000)) { g_rainFlashMesh = NULL; return false; }
+	}
+	return true;
+}
+
+void RainFlashClear()
+{
+	g_rainFlashMesh = NULL; g_rainFlashGrp = -1; g_rainFlashUntil = 0;
 }
 
 void D3D9Mesh::Null(const char *meshName /* = NULL */)
@@ -532,6 +695,10 @@ D3D9Mesh::~D3D9Mesh()
 
 	if (MeshCatalog.erase(this)) LogAlw("Mesh %s Removed from catalog", _PTR(this));
 	else 						 LogErr("Mesh %s wasn't in meshcatalog", _PTR(this));
+
+	// ORO patch (h) part 4: a dying mesh takes its confirmation flash with it, so the
+	// pointer can never dangle into a recycled allocation.
+	if (RainFlashActive(this)) { extern void RainFlashClear(); RainFlashClear(); }
 
 	Release();
 
@@ -1157,6 +1324,66 @@ void D3D9Mesh::SetTexMixture(DWORD ntex, float mix)
 }
 
 // ===========================================================================================
+// ORO patch: the classic <tex>_n night-texture pair, completed for MESH base objects.
+// The CORE's base compiler attaches the night texture as layer TexIdxEx[0] for the
+// generic object types (HANGAR/TANK/LPAD...), and vBase's day/night switch flips
+// TexMixEx - but MESH blocks in a base cfg (and the RUNWAY surface) arrive with the
+// night layer EMPTY, so base authors' most-used object type never had night lighting.
+// The core cannot be patched (Orbiter.exe is not shipped), and does not need to be:
+// every texture is loaded BY the client, so the names are known here. This walks the
+// day textures of a freshly built structure mesh and attaches "<name>_n.<ext>" where
+// such a file exists; from then on the EXISTING switch and the EXISTING render path
+// (the night layer binds as the emission map) treat it exactly like a hangar's.
+// Called by vBase for its structure meshes only - vessels are not part of this
+// convention. Loads are SHARED so the client's texture cache owns the lifetime: a
+// re-created base visual reuses the same surface, nothing leaks per rebuild. The
+// existence probe goes through TexturePath (the client's own search path), so a
+// missing sibling - the overwhelmingly common case - is silent.
+void D3D9Mesh::AttachNightTextures()
+{
+	if (!IsOK() || !gc) return;
+
+	DWORD dayIdx[64], nightIdx[64], nMap = 0;
+
+	for (DWORD g = 0; g < nGrp; g++) {
+		if (Grp[g].TexIdxEx[0] != 0) continue;              // already has a night layer (core-wired)
+		const DWORD ti = Grp[g].TexIdx;
+		if (ti == 0 || ti >= nTex || !Tex[ti]) continue;    // no day texture to pair
+
+		DWORD m = 0;                                        // probe each day texture once
+		for (; m < nMap; m++) if (dayIdx[m] == ti) break;
+		if (m == nMap) {
+			if (nMap == 64) continue;
+			dayIdx[nMap] = ti; nightIdx[nMap] = 0; nMap++;
+
+			// "<dir\name>.<ext>" -> "<dir\name>_n.<ext>"
+			char sib[192], ext[32] = "";
+			strcpy_s(sib, sizeof(sib), Tex[ti]->GetName());
+			char* dot = strrchr(sib, '.');
+			if (dot) { strcpy_s(ext, sizeof(ext), dot); *dot = 0; }
+			strcat_s(sib, sizeof(sib), "_n");
+			strcat_s(sib, sizeof(sib), ext);
+
+			char full[MAX_PATH];
+			if (gc->TexturePath(sib, full)) {
+				SURFHANDLE hN = gc->clbkLoadTexture(sib, 0x8);   // 0x8 = shared
+				if (hN) {
+					SurfNative** nt = new lpSurfNative[nTex + 1];
+					memcpy(nt, Tex, nTex * sizeof(lpSurfNative));
+					nt[nTex] = SURFACE(hN);
+					delete[] Tex;
+					Tex = nt;
+					nightIdx[m] = nTex;
+					nTex++;
+					LogAlw("D3D9Mesh(%s): night texture '%s' attached", _PTR(this), sib);
+				}
+			}
+		}
+		if (nightIdx[m]) Grp[g].TexIdxEx[0] = nightIdx[m];
+	}
+}
+
+// ===========================================================================================
 //
 void D3D9Mesh::SetSunLight(const D3D9Sun *light)
 {
@@ -1607,7 +1834,10 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
 		bMtrlModidied = false;
 	}
 
-	if (DebugControls::IsActive() == false) {
+	// ORO patch (h) part 4: a mesh carrying the pick-confirmation flash takes the full
+	// path for the flash's second - RenderFast has no eColor hook, exactly as it has no
+	// Debug highlighting (the Debug dialog forces the slow path the same way).
+	if (DebugControls::IsActive() == false && !RainFlashActive(this)) {
 		if (bCanRenderFast && vClass != VCLASS_XR2) {
 			RenderFast(pW, iTech);
 			return;
@@ -1628,6 +1858,11 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
 		if (displ>0 && !bActiveVisual) return;
 		if ((displ==2 || displ==3) && uCurrentMesh!=selmsh) return;
 	}
+
+	// ORO patch (h) part 4: is the pick-confirmation highlight live on THIS mesh?
+	// Sampled once so every group agrees within the frame. The end-of-render eColor
+	// reset below already restores state, so the highlight needs no cleanup of its own.
+	const bool bRsFlash = RainFlashActive(this);
 
 	Scene *scn = gc->GetScene();
 
@@ -1717,6 +1952,13 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
 
 	int nMeshLights = 0;
 
+	// ORO patch (z3) round 2b: each mesh picks its own strongest lights, so the frame's
+	// shadow-mapped scene light lands in a DIFFERENT slot per mesh (or in none) - match
+	// by scene index here, where both are known. Same shape as the terrain's per-tile
+	// match in Surfmgr2. Set for EVERY mesh, or one mesh inherits its predecessor's.
+	const Scene::LOCALSHADOWPARAM* lsp = gc->GetScene()->GetLocalShadowData();
+	float lclSlot = -1.0f;
+
 	if (pLights && nSceneLights>0) {
 
 		D3DXVECTOR3 pos;
@@ -1744,8 +1986,9 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
 			// Create a list of N most effective lights ---------------------------------------------
 			for (int i = 0; i < nMeshLights; i++) {
 				memcpy(&Locals[i], &pLights[LightList[i].idx], sizeof(LightStruct));
+				if (LightList[i].idx == lsp->idx) lclSlot = (float)i;	// ORO patch (z3) 2b
 
-				// Override application configuration to prevent oversaturation of lights at point plank range. 
+				// Override application configuration to prevent oversaturation of lights at point plank range.
 				if (scn->GetRenderPass() == RENDERPASS_MAINSCENE)
 					Locals[i].Attenuation.x = max(Locals[i].Attenuation.x, float(Config->GFXLocalMax));
 			}
@@ -1753,6 +1996,19 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
 	}
 
 	FX->SetValue(eLights, Locals, sizeof(LightStruct) * Config->MaxLights());
+
+	// ORO patch (z3) round 2b: hand the mesh the local-light shadow map
+	{
+		D3DXVECTOR4 lv(lclSlot, 0.0f, 0.0f, 0.0f);
+		if (lclSlot >= 0.0f) {
+			lv.y = 1.0f / (float)lsp->size;
+			lv.z = lsp->texel;		// the normal-offset + footprint-bias scale
+			lv.w = lsp->kdepth;		// metres-along-ray -> 1-z/w units
+			FX->SetMatrix(eLclShdVP, &lsp->mViewProj);
+			FX->SetTexture(eLclShmTex, lsp->pShadowMap);
+		}
+		FX->SetVector(eLclShd, &lv);
+	}
 
 
 	if (nEnv >= 1 && pEnv[0]) FX->SetTexture(eEnvMapA, pEnv[0]);
@@ -1823,7 +2079,12 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
 			if (CurrentShader != SHADER_NULL) { HR(FX->EndPass()); }
 			HR(FX->BeginPass(Grp[g].Shader));
 			CurrentShader = Grp[g].Shader;
-			if (iTech == RENDER_BASEBS) pDev->SetRenderState(D3DRS_ZENABLE, 0);	// Must be here because BeginPass() sets it enabled
+			// ORO patch (z): below-shadow base structures (RUNWAY, LPAD) OBEY the
+			// depth buffer. The stock ZENABLE=0 here is a flat-planet fossil - with
+			// terrain elevation, a runway painted through a mountain standing
+			// between camera and base is the visible symptom (stock bug, no addon
+			// needed). Depth TEST on, WRITE off: still a decal, now an occludable one.
+			if (iTech == RENDER_BASEBS) pDev->SetRenderState(D3DRS_ZWRITEENABLE, 0);	// Must be here because BeginPass() resets it
 		}
 
 
@@ -1849,6 +2110,16 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
 					}
 				}
 			}
+		}
+
+		// ORO patch (h) part 4: the RAINSURFACES pick-confirmation highlight - the
+		// clicked group holds the Debug dialog's own green (same eColor override as
+		// above) while the mouse button stays pressed, no dialog open. Written per
+		// group while the highlight is live, so leaving the target group restores
+		// zero; the end-of-render reset covers the rest.
+		if (bRsFlash) {
+			const bool on = ((int)g == g_rainFlashGrp);
+			FX->SetVector(eColor, ptr(D3DXVECTOR4(0.0f, on ? 0.5f : 0.0f, 0.0f, on ? 0.5f : 0.0f)));
 		}
 
 
@@ -1981,7 +2252,7 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
 
 				old_mat = mat;
 
-				FX->SetValue(eMtrl, mat, sizeof(D3D9MatExt)-4);
+				FX->SetValue(eMtrl, OroVCNightMat(mat), sizeof(D3D9MatExt)-4);   // ORO patch (ad)
 
 				if (bModulateMatAlpha || bTextured==false)  FX->SetFloat(eMtrlAlpha, mat->Diffuse.w);
 				else										FX->SetFloat(eMtrlAlpha, 1.0f);
@@ -2205,6 +2476,10 @@ void D3D9Mesh::RenderSimplified(const LPD3DXMATRIX pW, LPDIRECT3DCUBETEXTURE9 *p
 
 	//D3D9DebugLog("Mesh=[%s], nLights=%d", GetName(), nSceneLights);
 
+	// ORO patch (z3) round 2b: the per-mesh slot match, as in Render()
+	const Scene::LOCALSHADOWPARAM* lsp = gc->GetScene()->GetLocalShadowData();
+	float lclSlot = -1.0f;
+
 	if (pLights && nSceneLights>0) {
 
 		int nMeshLights = 0;
@@ -2231,11 +2506,27 @@ void D3D9Mesh::RenderSimplified(const LPD3DXMATRIX pW, LPDIRECT3DCUBETEXTURE9 *p
 			nMeshLights = min(nMeshLights, Config->MaxLights());
 
 			// Create a list of N most effective lights ---------------------------------------------
-			for (int i = 0; i < nMeshLights; i++) memcpy(&Locals[i], &pLights[LightList[i].idx], sizeof(LightStruct));
+			for (int i = 0; i < nMeshLights; i++) {
+				memcpy(&Locals[i], &pLights[LightList[i].idx], sizeof(LightStruct));
+				if (LightList[i].idx == lsp->idx) lclSlot = (float)i;	// ORO patch (z3) 2b
+			}
 		}
 	}
 
 	FX->SetValue(eLights, Locals, sizeof(LightStruct) * Config->MaxLights());
+
+	// ORO patch (z3) round 2b: hand the mesh the local-light shadow map
+	{
+		D3DXVECTOR4 lv(lclSlot, 0.0f, 0.0f, 0.0f);
+		if (lclSlot >= 0.0f) {
+			lv.y = 1.0f / (float)lsp->size;
+			lv.z = lsp->texel;		// the normal-offset + footprint-bias scale
+			lv.w = lsp->kdepth;		// metres-along-ray -> 1-z/w units
+			FX->SetMatrix(eLclShdVP, &lsp->mViewProj);
+			FX->SetTexture(eLclShmTex, lsp->pShadowMap);
+		}
+		FX->SetVector(eLclShd, &lv);
+	}
 
 	if (nEnv >= 1 && pEnv[0]) FX->SetTexture(eEnvMapA, pEnv[0]);
 	int curEnvCam = 0;   // ORO patch (v): as in Render() - the simplified path too
@@ -2350,7 +2641,7 @@ void D3D9Mesh::RenderSimplified(const LPD3DXMATRIX pW, LPDIRECT3DCUBETEXTURE9 *p
 			else mat = &Mtrl[Grp[g].MtrlIdx];
 			if (mat != old_mat) {
 				old_mat = mat;
-				FX->SetValue(eMtrl, mat, sizeof(D3D9MatExt) - 4);
+				FX->SetValue(eMtrl, OroVCNightMat(mat), sizeof(D3D9MatExt) - 4);   // ORO patch (ad)
 				if (bModulateMatAlpha || bTextured == false) FX->SetFloat(eMtrlAlpha, mat->Diffuse.w);
 				else FX->SetFloat(eMtrlAlpha, 1.0f);
 			}
@@ -2527,6 +2818,10 @@ void D3D9Mesh::RenderFast(const LPD3DXMATRIX pW, int iTech)
 
 	//D3D9DebugLog("Mesh=[%s], nLights=%d", GetName(), nSceneLights);
 
+	// ORO patch (z3) round 2b: the per-mesh slot match, as in Render()
+	const Scene::LOCALSHADOWPARAM* lsp = gc->GetScene()->GetLocalShadowData();
+	float lclSlot = -1.0f;
+
 	if (pLights && nSceneLights>0) {
 
 		int nMeshLights = 0;
@@ -2554,11 +2849,27 @@ void D3D9Mesh::RenderFast(const LPD3DXMATRIX pW, int iTech)
 
 			// Create a list of N most effective lights ---------------------------------------------
 			int i;
-			for (i = 0; i < nMeshLights; i++) memcpy(&Locals[i], &pLights[LightList[i].idx], sizeof(LightStruct));
+			for (i = 0; i < nMeshLights; i++) {
+				memcpy(&Locals[i], &pLights[LightList[i].idx], sizeof(LightStruct));
+				if (LightList[i].idx == lsp->idx) lclSlot = (float)i;	// ORO patch (z3) 2b
+			}
 		}
 	}
 
 	FX->SetValue(eLights, Locals, sizeof(LightStruct) * Config->MaxLights());
+
+	// ORO patch (z3) round 2b: hand the mesh the local-light shadow map
+	{
+		D3DXVECTOR4 lv(lclSlot, 0.0f, 0.0f, 0.0f);
+		if (lclSlot >= 0.0f) {
+			lv.y = 1.0f / (float)lsp->size;
+			lv.z = lsp->texel;		// the normal-offset + footprint-bias scale
+			lv.w = lsp->kdepth;		// metres-along-ray -> 1-z/w units
+			FX->SetMatrix(eLclShdVP, &lsp->mViewProj);
+			FX->SetTexture(eLclShmTex, lsp->pShadowMap);
+		}
+		FX->SetVector(eLclShd, &lv);
+	}
 
 	UINT numPasses = 0;
 	HR(FX->Begin(&numPasses, D3DXFX_DONOTSAVESTATE));
@@ -2567,7 +2878,9 @@ void D3D9Mesh::RenderFast(const LPD3DXMATRIX pW, int iTech)
 	//
 	HR(FX->BeginPass(2));
 
-	if (iTech == RENDER_BASEBS) pDev->SetRenderState(D3DRS_ZENABLE, 0);	// Must be here because BeginPass() sets it enabled
+	// ORO patch (z): depth TEST stays on for below-shadow base structures - see
+	// the note at the other RENDER_BASEBS site. Write off: a decal, occludable.
+	if (iTech == RENDER_BASEBS) pDev->SetRenderState(D3DRS_ZWRITEENABLE, 0);	// Must be here because BeginPass() resets it
 
 	for (DWORD g = 0; g<nGrp; g++) {
 
@@ -2683,7 +2996,7 @@ void D3D9Mesh::RenderFast(const LPD3DXMATRIX pW, int iTech)
 
 				old_mat = mat;
 
-				FX->SetValue(eMtrl, mat, sizeof(D3D9MatExt)-4);
+				FX->SetValue(eMtrl, OroVCNightMat(mat), sizeof(D3D9MatExt)-4);   // ORO patch (ad)
 
 				if (bModulateMatAlpha || bTextured == false)  FX->SetFloat(eMtrlAlpha, mat->Diffuse.w);
 				else										  FX->SetFloat(eMtrlAlpha, 1.0f);

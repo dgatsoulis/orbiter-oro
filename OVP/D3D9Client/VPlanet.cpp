@@ -320,6 +320,32 @@ void FilterElevationGraphics(OBJHANDLE hPlanet, int lvl, int ilat, int ilng, flo
 }
 
 
+// ORO patch (af) (2026-09-06): TERRAIN FLATTENING UNDER CUBIC INTERPOLATION.
+// Stock flattens the tile's FLOAT copy (FilterElevationGraphics) and the core's physics
+// tiles (FilterElevationPhysics), and never the RAW INT16 file array a SurfTile keeps as
+// elev_file. In LINEAR elevation mode that is enough: a file-less child tile upsamples
+// its parent's float copy, already flat, and the flat is inherited down the whole tree.
+// In CUBIC mode (the core's DEFAULT) a file-less child hands the nearest ancestor's RAW
+// array to the core's spline (LoadElevationData, ElevationGrid) - unflattened - and the
+// result is never filtered. Near the ground every tile in view is a file-less child, so
+// the drawn terrain kept its hills while the vessel stood on the flattened physics
+// height. The splash code still carries the commented-out "Terrain flattening offline
+// due to cubic interpolation". This filters the file array at its own level with the
+// physics filter's exact arithmetic (INT16, elev_res units), so cubic children inherit
+// the flat at any depth, and the drawn mesh and the physics ground derive from the SAME
+// integer-rounded flattening. The array has one reader in the client (the cubic branch).
+bool FilterElevationFile(OBJHANDLE hPlanet, int lvl, int ilat, int ilng, double elev_res, INT16* elev)
+{
+	if (!Config->bFlats) return false;
+	char name[64];
+	oapiGetObjectName(hPlanet, name, 64);
+	auto result = FilterElevation<INT16>(hPlanet, lvl, ilat, ilng, elev_res, elev);
+	if (result)
+		LogClr("Coral", "FilterElevation[File][%s]: Level=%d, ilat=%d, ilng=%d", name, lvl, ilat, ilng);
+	return result;
+}
+
+
 
 
 
@@ -1183,12 +1209,12 @@ void vPlanet::RenderSphere (LPDIRECT3DDEVICE9 dev)
 
 	if (nbase) {
 		RenderBaseSurfaces (dev);                     // base surfaces
-		RenderBaseShadows (dev, shadowalpha);         // base shadows
+		if (Config->TerrainShadowing != 3) RenderBaseShadows (dev, shadowalpha);   // base shadows - ORO patch (ae): mode 3 draws no sheets
 	}
 	if (prm.bCloudShadow)
 		RenderCloudShadows (dev);                		// cloud shadows
 
-	if (bVesselShadow && hObj == oapiCameraProxyGbody())
+	if (bVesselShadow && hObj == oapiCameraProxyGbody() && Config->TerrainShadowing != 3)   // ORO patch (ae): mode 3 draws no sheets
 	// cast shadows only on planet closest to camera
 		scn->RenderVesselShadows (hObj, shadowalpha); // vessel shadows
 }
@@ -1263,6 +1289,20 @@ void vPlanet::RenderBaseStructures (LPDIRECT3DDEVICE9 dev)
 	if (scn->GetRenderFlags() & 0x20) {
 		for (DWORD i = 0; i < nbase; i++) if (vbase[i]) vbase[i]->RenderStructures(dev);
 		for (DWORD i = 0; i < nbase; i++) if (vbase[i]) vbase[i]->RenderBeacons(dev);
+	}
+}
+
+// ==============================================================
+// ORO patch (z2): the depth-pass companion of RenderBaseStructures - same proxy-body
+// and render-flag guards (a base the user has switched off must not occlude either),
+// depth writes only. See vBase::RenderStructureDepth for the story.
+
+void vPlanet::RenderBaseDepth (const LPD3DXMATRIX pVP, int opt)
+{
+	if (hObj != oapiCameraProxyGbody()) return;
+
+	if (scn->GetRenderFlags() & 0x20) {
+		for (DWORD i = 0; i < nbase; i++) if (vbase[i]) vbase[i]->RenderStructureDepth(pVP, opt);
 	}
 }
 

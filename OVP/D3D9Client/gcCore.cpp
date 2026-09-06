@@ -45,6 +45,9 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
 	if (strcmp(name,"GetBackBufferHandle")==0) *ppFnc = &gcCore2::GetBackBufferHandle;
 	if (strcmp(name,"CopyResource")==0) *ppFnc = &gcCore2::CopyResource;
 	if (strcmp(name,"SuppressReentry")==0) *ppFnc = &gcCore2::SuppressReentry;
+	if (strcmp(name,"GetDevMeshName")==0) *ppFnc = &gcCore2::GetDevMeshName;
+	if (strcmp(name,"ReloadRainSurfaces")==0) *ppFnc = &gcCore2::ReloadRainSurfaces;
+	if (strcmp(name,"FlashMeshGroup")==0) *ppFnc = &gcCore2::FlashMeshGroup;
 	if (strcmp(name,"SuppressExhaust")==0) *ppFnc = &gcCore2::SuppressExhaust;
 	if (strcmp(name,"ExemptNewStreams")==0) *ppFnc = &gcCore2::ExemptNewStreams;
 	if (strcmp(name,"GetExhaustStreamSpec")==0) *ppFnc = &gcCore2::GetExhaustStreamSpec;
@@ -55,6 +58,11 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
 	if (strcmp(name,"SetWetGlint")==0) *ppFnc = &gcCore2::SetWetGlint;
 	if (strcmp(name,"SetWetReflection")==0) *ppFnc = &gcCore2::SetWetReflection;
 	if (strcmp(name,"SetWetGrain")==0) *ppFnc = &gcCore2::SetWetGrain;
+	if (strcmp(name,"SetFogLayer")==0) *ppFnc = &gcCore2::SetFogLayer;
+	if (strcmp(name,"SetFogLook")==0) *ppFnc = &gcCore2::SetFogLook;
+	if (strcmp(name,"SetSnowCover")==0) *ppFnc = &gcCore2::SetSnowCover;
+	if (strcmp(name,"SetBaseLights")==0) *ppFnc = &gcCore2::SetBaseLights;
+	if (strcmp(name,"SetVCNightLight")==0) *ppFnc = &gcCore2::SetVCNightLight;
 	if (strcmp(name,"ReleaseSwap")==0) *ppFnc = &gcCore2::ReleaseSwap;
 	if (strcmp(name,"DeleteCustomCamera")==0) *ppFnc = &gcCore2::DeleteCustomCamera;
 	if (strcmp(name,"CustomCameraOnOff")==0) *ppFnc = &gcCore2::CustomCameraOnOff;
@@ -231,6 +239,38 @@ void gcCore::SuppressReentry(OBJHANDLE hVessel, bool bSuppress)
 	else           g_gcReentrySuppressed.erase(hVessel);
 }
 
+// --- ORO patch (h) part 3: the file name behind a device mesh handle --------------
+// GENERICPROC_PICK_VESSEL's PickData carries a DEVICE mesh handle (a D3D9Mesh*,
+// not a core template), and only the client knows the mesh FILE name behind it -
+// which is what persistent per-mesh declarations (VesselsRainSurfaces.cfg) are
+// keyed on. D3D9Mesh::name is filled from oapiGetMeshFilename at load, the same
+// string clbkStoreMeshPersistent speaks, so the two sides agree by construction.
+void gcCore::GetDevMeshName(MESHHANDLE hMesh, char* out, int size)
+{
+	if (!out || size < 1) return;
+	out[0] = 0;
+	if (!hMesh) return;
+	const D3D9Mesh* pM = (const D3D9Mesh*)hMesh;
+	const char* n = pM->GetName();
+	if (n) strncpy_s(out, size, n, _TRUNCATE);
+}
+
+// --- ORO patch (h) part 4: live re-application + the pick-confirmation flash ------
+// Both live in Mesh.cpp beside the store they operate on (the extern-at-the-call
+// pattern, no header churn). Reload is what lets the picker's SAVE take effect on
+// the next frame; the flash is the Debug dialog's own green, borrowed for a second.
+void gcCore::ReloadRainSurfaces()
+{
+	extern void RainGlassReload();
+	RainGlassReload();
+}
+
+void gcCore::FlashMeshGroup(MESHHANDLE hMesh, int grp, int msec)
+{
+	extern void RainFlashGroup(MESHHANDLE hMesh, int grp, int msec);
+	RainFlashGroup(hMesh, grp, msec);
+}
+
 // --- ORO patch (f): virtual-cockpit shadow controls -------------------------------
 // Read by Scene::RenderMainScene's internal pass (declared extern there, the same
 // no-header-churn pattern as gcIsReentrySuppressed above). Defaults reproduce the
@@ -318,6 +358,64 @@ void gcCore::SetWetGrain(float fOpacity, float fSize)
 {
 	g_gcWetGrainOp   = (fOpacity < 0.0f) ? 0.0f : (fOpacity > 2.0f ? 2.0f : fOpacity);
 	g_gcWetGrainSize = (fSize    < 0.0f) ? 0.0f : (fSize    > 2.0f ? 2.0f : fSize);
+}
+
+// ORO patch (aa): THE AIR. Two fog layers + the look + snow cover. Read by
+// Scene::RenderMainScene's per-frame fog block (extern there). Defaults = no fog, no
+// snow, so a client nobody calls is bit-stock.
+double g_gcFogBase[2]  = { 0.0, 0.0 };     // geocentric base radius per layer, m
+float  g_gcFogTop[2]   = { 0.0f, 0.0f };   // thickness per layer, m (0 = off)
+float  g_gcFogScale[2] = { 1.0f, 1.0f };   // density scale height per layer, m
+float  g_gcFogDens[2]  = { 0.0f, 0.0f };   // extinction at the base per layer, 1/m
+float  g_gcFogBright   = 1.0f;
+float  g_gcFogSunGlow  = 1.0f;
+float  g_gcSnowCover   = 0.0f;
+float  g_gcSnowLine    = -1e6f;
+float  g_gcSnowLineW   = 300.0f;
+
+void gcCore::SetFogLayer(int idx, double rBase, float hTop, float scaleH, float dens)
+{
+	if (idx < 0 || idx > 1) return;
+	g_gcFogBase[idx]  = rBase;
+	g_gcFogTop[idx]   = (hTop   < 0.0f) ? 0.0f : hTop;
+	g_gcFogScale[idx] = (scaleH < 1.0f) ? 1.0f : scaleH;
+	// 0.5/m is an 8 m visibility - anything denser is a wall, and the exponentials
+	// stay well-conditioned below it.
+	g_gcFogDens[idx]  = (dens < 0.0f) ? 0.0f : (dens > 0.5f ? 0.5f : dens);
+}
+
+void gcCore::SetFogLook(float brightness, float sunGlow)
+{
+	g_gcFogBright  = (brightness < 0.0f) ? 0.0f : (brightness > 3.0f ? 3.0f : brightness);
+	g_gcFogSunGlow = (sunGlow    < 0.0f) ? 0.0f : (sunGlow    > 3.0f ? 3.0f : sunGlow);
+}
+
+void gcCore::SetSnowCover(float cover, float lineAlt, float lineWidth)
+{
+	g_gcSnowCover = (cover < 0.0f) ? 0.0f : (cover > 1.0f ? 1.0f : cover);
+	g_gcSnowLine  = lineAlt;
+	g_gcSnowLineW = (lineWidth < 1.0f) ? 1.0f : lineWidth;
+}
+
+// ORO patch (ac): BASE LIGHTS. Read by vBase (the night flip) and around its structure,
+// tile and light draws (the glow). Defaults = stock.
+bool  g_gcBaseLightsForce = false;
+float g_gcBaseLightsGlow  = 1.0f;
+float g_gcBaseLightsHalo  = 1.0f;
+void gcCore::SetBaseLights(bool bForce, float glow, float halo)
+{
+	g_gcBaseLightsForce = bForce;
+	g_gcBaseLightsGlow  = (glow < 0.25f) ? 0.25f : (glow > 5.0f ? 5.0f : glow);
+	g_gcBaseLightsHalo  = (halo < 0.0f)  ? 0.0f  : (halo > 5.0f ? 5.0f : halo);
+}
+
+// --- ORO patch (ad): the cabin at night ---------------------------------------------
+// One scale, consumed by Scene's cockpit bracket only (Mesh.cpp's g_oroVCNightNow is
+// raised for the VC draw and dropped straight after). Default = stock.
+float g_gcVCNight = 1.0f;
+void gcCore::SetVCNightLight(float scale)
+{
+	g_gcVCNight = (scale < 0.0f) ? 0.0f : (scale > 1.0f ? 1.0f : scale);
 }
 
 // Queried by vVessel::RenderReentry (declared extern there - no header churn for one bool).

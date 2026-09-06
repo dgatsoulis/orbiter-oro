@@ -84,6 +84,13 @@ void D3D9Config::Reset ()
 	PresentLocation		= 1;
 	PlanetTileLoadFlags	= 0x3;
 	TerrainShadowing	= 2;
+	LocalLightShadows	= 1;			// ORO patch (z3): local spot lights cast real shadows by default
+	ShadowDepthTol		= 1.0;			// ORO patch (ab): HIS found value (Brighton Beach, 2026-09-05) - near a hard test with a metre of slack
+	ShadowDepthTolK		= 0.001;		// ORO patch (ab): per metre of distance - twice the depth buffer's fp16 step (0.05% of distance), the quantisation floor
+	ShadowDebug			= 0;			// ORO patch (ab) INSTRUMENT: off
+	ShadowCascadeSize	= 2048;			// ORO patch (ae)
+	ShadowCascadeFar	= 30000.0;		// ORO patch (ae)
+	ShadowCascadeSoft	= 1;			// ORO patch (ae)
 	ParticleLight		= 2;			// ORO patch (x): brightness + colour by default
 	ParticleShadow		= 1.0;			// ORO patch (x): stock shadow strength by default
 	ParticleTintLead	= 0.10;			// ORO patch (x): the smoke runs ~6 deg of sun ahead of the hull
@@ -162,7 +169,14 @@ bool D3D9Config::ReadParams ()
 	if (oapiReadItem_int   (hFile, (char*)"ShadowMapFilter", i))	 	ShadowFilter = max(0, min(5, i));
 	if (oapiReadItem_int   (hFile, (char*)"ShadowMapSize", i))			ShadowMapSize = max(512, min(4096, i));
 	if (oapiReadItem_int   (hFile, (char*)"EnableGlass", i))			EnableGlass = max(0, min(1, i));
-	if (oapiReadItem_int   (hFile, (char*)"TerrainShadowing", i))		TerrainShadowing = max(0, min(2, i));
+	if (oapiReadItem_int   (hFile, (char*)"TerrainShadowing", i))		TerrainShadowing = max(0, min(3, i));	// ORO patch (ae): 3 = cascaded
+	if (oapiReadItem_int   (hFile, (char*)"LocalLightShadows", i))		LocalLightShadows = max(0, min(1, i));
+	if (oapiReadItem_float (hFile, (char*)"ShadowDepthTol", d))		ShadowDepthTol = max(0.0, min(1000.0, d));
+	if (oapiReadItem_float (hFile, (char*)"ShadowDepthTolK", d))		ShadowDepthTolK = max(0.0, min(0.5, d));
+	if (oapiReadItem_int   (hFile, (char*)"ShadowDebug", i))		ShadowDebug = max(0, min(4, i));	// ORO patch (ae): 3 = dump the cascade atlas, 4 = + colour receivers by slot
+	if (oapiReadItem_int   (hFile, (char*)"ShadowCascadeSize", i))		ShadowCascadeSize = max(512, min(4096, i));
+	if (oapiReadItem_float (hFile, (char*)"ShadowCascadeFar", d))		ShadowCascadeFar = max(1000.0, min(60000.0, d));
+	if (oapiReadItem_int   (hFile, (char*)"ShadowCascadeSoft", i))		ShadowCascadeSoft = max(0, min(1, i));
 	if (oapiReadItem_int   (hFile, (char*)"ParticleLight", i))			ParticleLight = max(0, min(2, i));
 	if (oapiReadItem_float (hFile, (char*)"ParticleShadow", d))			ParticleShadow = max(0.0, min(1.0, d));
 	if (oapiReadItem_float (hFile, (char*)"ParticleTintLead", d))		ParticleTintLead = max(0.0, min(0.2, d));
@@ -287,6 +301,13 @@ void D3D9Config::WriteParams ()
 	WP_INT("ShadowMapFilter", ShadowFilter);
 	WP_INT("ShadowMapSize", ShadowMapSize);
 	WP_INT("TerrainShadowing", TerrainShadowing);
+	WP_INT("LocalLightShadows", LocalLightShadows);
+	WP_FLT("ShadowDepthTol", ShadowDepthTol);
+	WP_FLT("ShadowDepthTolK", ShadowDepthTolK);
+	WP_INT("ShadowDebug", ShadowDebug);
+	WP_INT("ShadowCascadeSize", ShadowCascadeSize);
+	WP_FLT("ShadowCascadeFar", ShadowCascadeFar);
+	WP_INT("ShadowCascadeSoft", ShadowCascadeSoft);
 	WP_INT("ParticleLight", ParticleLight);
 	WP_FLT("ParticleShadow", ParticleShadow);
 	WP_FLT("ParticleTintLead", ParticleTintLead);
@@ -398,6 +419,13 @@ static void WriteParams_stock_disabled (D3D9Config*)
 	oapiWriteItem_int   (hFile, (char*)"ShadowMapFilter", ShadowFilter);
 	oapiWriteItem_int   (hFile, (char*)"ShadowMapSize", ShadowMapSize);
 	oapiWriteItem_int   (hFile, (char*)"TerrainShadowing", TerrainShadowing);
+	oapiWriteItem_int   (hFile, (char*)"LocalLightShadows", LocalLightShadows);
+	oapiWriteItem_float (hFile, (char*)"ShadowDepthTol", ShadowDepthTol);
+	oapiWriteItem_float (hFile, (char*)"ShadowDepthTolK", ShadowDepthTolK);
+	oapiWriteItem_int   (hFile, (char*)"ShadowDebug", ShadowDebug);
+	oapiWriteItem_int   (hFile, (char*)"ShadowCascadeSize", ShadowCascadeSize);
+	oapiWriteItem_float (hFile, (char*)"ShadowCascadeFar", ShadowCascadeFar);
+	oapiWriteItem_int   (hFile, (char*)"ShadowCascadeSoft", ShadowCascadeSoft);
 	oapiWriteItem_int   (hFile, (char*)"ParticleLight", ParticleLight);
 	oapiWriteItem_float (hFile, (char*)"ParticleShadow", ParticleShadow);
 	oapiWriteItem_float (hFile, (char*)"ParticleTintLead", ParticleTintLead);

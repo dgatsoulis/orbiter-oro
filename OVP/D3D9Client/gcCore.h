@@ -444,6 +444,31 @@ public:
 	gc_interface void SuppressReentry(OBJHANDLE hVessel, bool bSuppress);
 
 	/**
+	* \brief Get the FILE name behind a device mesh handle (ORO patch (h) part 3).
+	* \note GENERICPROC_PICK_VESSEL hands out a DEVICE mesh handle; only the client
+	*  knows the mesh file name behind it, which is what persistent per-mesh
+	*  declarations (the rain-surface cfg) must be keyed on.
+	*/
+	gc_interface void GetDevMeshName(MESHHANDLE hMesh, char* out, int size);
+
+	/**
+	* \brief Re-read VesselsRainSurfaces.cfg and re-apply every rain-glass declaration
+	*  to the LIVE meshes (ORO patch (h) part 4) - the picker's SAVE takes effect on
+	*  the next frame instead of the next scenario load.
+	*/
+	gc_interface void ReloadRainSurfaces();
+
+	/**
+	* \brief Light one mesh group in the Debug dialog's green (ORO patch (h) part 4) -
+	*  the RAINSURFACES picker's pick confirmation.
+	* \param hMesh DEVICE mesh handle (as handed out by GENERICPROC_PICK_VESSEL)
+	* \param grp group index within that mesh
+	* \param msec > 0: a timed highlight; <= 0: HELD - lit for as long as the mouse
+	*  button that made the pick stays pressed (the Debug dialog's own behaviour).
+	*/
+	gc_interface void FlashMeshGroup(MESHHANDLE hMesh, int grp, int msec);
+
+	/**
 	* \brief Suppress this client's engine-exhaust rendering for one vessel (ORO patch n).
 	* \param hVessel vessel to suppress (or re-enable)
 	* \param bSuppress true to hide the stock exhaust billboards AND stop its exhaust
@@ -575,6 +600,77 @@ ote A taste knob on the albedo term only - the mirror and the puddle mask ride
 	* \param fSize Grain feature size scale. 1 = designed, bigger = coarser. Clamped 0..2.
 	*/
 	gc_interface void SetWetGrain(float fOpacity, float fSize);
+
+	/**
+	* \brief ORO patch (aa): THE AIR - one FOG LAYER. Two layers exist (idx 0 and 1);
+	*   each is a slab of thickness hTop metres standing on a geocentric base radius,
+	*   with an exponential density profile dens * exp(-h / scaleH) inside it. The client
+	*   integrates the optical depth analytically along every camera->pixel segment in
+	*   every shader family (terrain, base tiles, the five vessel paths, particles, runway
+	*   lights, the sky dome, the cloud layer seen from below) and lerps each pixel's FINAL
+	*   colour toward a fog colour it computes itself from its atmosphere model at the
+	*   camera; the direct sun is attenuated by the column above each pixel and the
+	*   ambient lifted by what the fog scatters back. Binds in the probe cubes and both
+	*   mirror passes by construction. Exactly inert at dens 0 or hTop 0.
+	* \param idx Layer index, 0 or 1. The addon decides what each carries (ORO: 0 = the
+	*   ground fog anchored to the terrain under the vessel, 1 = the storm's mist).
+	* \param rBase Geocentric radius of the layer base, metres (planet radius + ground
+	*   elevation at the anchor). The camera proxy body is assumed.
+	* \param hTop Layer thickness above the base, metres. 0 = layer off.
+	* \param scaleH Density scale height, metres (density falls to 1/e per scaleH above
+	*   the base). Large = a uniform slab with a hard top. Clamped to >= 1.
+	* \param dens Extinction at the base, 1/m (Koschmieder: ~3.9 / visibility).
+	*   Clamped to 0..0.5.
+	*/
+	gc_interface void SetFogLayer(int idx, double rBase, float hTop, float scaleH, float dens);
+
+	/**
+	* \brief ORO patch (aa): the fog's two taste numbers. The colour itself is the
+	*   client's (sky ambient + the sun through the fog, so it is warm at dawn and grey
+	*   under a storm deck); these scale it.
+	* \param brightness Gain on the lit fog colour, 1 = designed. Clamped 0..3.
+	* \param sunGlow Gain on the forward-scatter lobe toward the sun, 1 = designed,
+	*   0 = none. Clamped 0..3.
+	*/
+	gc_interface void SetFogLook(float brightness, float sunGlow);
+
+	/**
+	* \brief ORO patch (aa): SNOW COVER - whitens up-facing surfaces (terrain above a
+	*   snow line, base tiles, hulls) in every shader family. Material, not geometry.
+	*   The plumbing ships with the fog round; the look is tuned in the snow round.
+	* \param cover 0 = none (stock), 1 = full cover. Clamped 0..1.
+	* \param lineAlt Snow-line altitude in metres over the planet's mean radius (terrain
+	*   only - everything else is covered regardless). Pass -1e6 for "everywhere".
+	* \param lineWidth Metres over which the line fades in. Clamped to >= 1.
+	*/
+	gc_interface void SetSnowCover(float cover, float lineAlt, float lineWidth);
+
+	/**
+	* \brief ORO patch (ac): BASE LIGHTS. Force every base's NIGHT state on - the night
+	*   textures on its structures and tiles, the runway and taxiway lights - regardless of
+	*   the sun, and scale the lit result for the bloom. Low visibility is when a real
+	*   airfield switches its lights on; the addon decides when, the client keeps the stock
+	*   day/night flip underneath (force off = stock: on at night, off by day).
+	* \param bForce true = night state on everywhere now; false = stock behaviour.
+	* \param glow Gain on the night textures' emission and the light sprites' colour,
+	*   1 = stock. Past 1 the fp16 chain carries the excess into the "Light glow"
+	*   post-process, which is how the lights bloom. Clamped 0.25..5.
+	* \param halo Gain on the fog AUREOLE round each light sprite: size and softness grow
+	*   with the optical depth between the lamp and the eye (patch (aa)'s fog), scaled by
+	*   this. 1 = designed, 0 = plain attenuation only. Clamped 0..5.
+	*/
+	gc_interface void SetBaseLights(bool bForce, float glow, float halo);
+
+	/**
+	* \brief ORO patch (ad): THE CABIN AT NIGHT. Scale the light that is NOT THERE in the
+	*   cockpit pass: the Launchpad ambient fill and the material EMISSIVE that VC authors
+	*   use as a night fill (the stock DeltaGlider carries emissive 0.8 on nearly every
+	*   cabin surface, so its cockpit reads fully lit at midnight). Real lights survive:
+	*   MFD screens, black-diffuse DISPLAY materials (emissive is their whole picture),
+	*   emission maps, and every local light emitter. Exterior passes never see it.
+	* \param scale 1 = stock, 0 = the cabin is lit by its own lamps only. Clamped 0..1.
+	*/
+	gc_interface void SetVCNightLight(float scale);
 
 	/**
 	* \brief Release a swap object after it's no longer needed.

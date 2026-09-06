@@ -23,6 +23,7 @@
 #include "CelSphere.h"
 #include "VObject.h"
 #include <stack>
+#include <vector>
 #include <list>
 #include <set>
 
@@ -174,6 +175,55 @@ public:
 		int			lod;
 		int			size;
 	} smap;
+
+	// ORO patch (z3): the LOCAL-LIGHT shadow map - one perspective depth map rendered
+	// from the frame's strongest shadow-casting SPOT light (vessels + base structures
+	// as casters), consumed by the terrain shader so a spotlight beam is carved by a
+	// building and a vessel standing in the beam casts onto the ground. idx = the
+	// scene light (Lights[]) being shadowed, -1 = no map this frame.
+	struct LOCALSHADOWPARAM {
+		LPDIRECT3DTEXTURE9 pShadowMap;
+		D3DXMATRIX	mViewProj;
+		D3DXVECTOR3	pos;		// light position, camera-centred world
+		float		range;		// light range [m]
+		int			idx;		// scene light index, -1 = none
+		int			size;		// map size in texels
+		float		texel;		// world texel size per metre of light distance
+								// (2 tan(fov/2) / size) - drives the receivers'
+								// NORMAL-OFFSET, the grazing-acne cure
+		float		kdepth;		// near*far/(far-near): converts metres-along-ray to
+								// the map's 1-z/w units - drives the receivers'
+								// TEXEL-FOOTPRINT bias (grazing, exact, no fade)
+		bool		terrainOK;	// 2026-09-05, the DAY SPLIT: false while the sun is
+								// up. Gates ONLY the terrain receiver's sampler
+								// borrow (Surfmgr2) - the daylight conflict was
+								// always the borrow's, never the test's. Vessels
+								// bind both maps with headroom and receive day and
+								// night; casters and registration key off idx alone.
+	} lsmap;
+
+	const LOCALSHADOWPARAM * GetLocalShadowData() const { return &lsmap; }
+
+	// ⛔ ORO patch (z3) round 3 (the BASE SUN MAP - draped building shadows onto
+	// terrain via a coarse ortho map bound into the TerrainShadowing-2 slots) was
+	// BUILT, FLOWN AND REVERTED 2026-09-03, his call after three fix rounds: the
+	// per-tile slot steal kept trading one artifact for another (vessel shadows
+	// eaten in tile bites, volume-fit shimmer, transparent flickering building
+	// shadows). The honest route needs a receiver path that does not fight the
+	// stock tile bindings - parked with the stencil-shadow revert of patch (z).
+
+	// ORO patch (z3) round 2c: a terrain tile registers itself as a local-light
+	// shadow CASTER (called from the Surfmgr2 tile render; drawn into the NEXT
+	// frame's map - terrain does not move, so one frame stale is free). The
+	// buffers are AddRef'd here so an LRU-evicted tile cannot dangle - the 23m
+	// law applied to VRAM.
+	void RegisterLclShadowTile(LPDIRECT3DVERTEXBUFFER9 pVB, LPDIRECT3DINDEXBUFFER9 pIB,
+	                           DWORD nv, DWORD nf, const D3DXMATRIX* pW,
+	                           const D3DXVECTOR3* pBs, float bsRad, OBJHANDLE hPlanet) const;
+	// ORO patch (ab): TERRAIN WRITES GBUF_DEPTH NOW. The registry above feeds the depth
+	// pass as well as the local map, so the tile render registers every nearby tile
+	// whenever the buffer exists (it exists with the glares - the 20g rule).
+	bool WantsTerrainDepth() const { return ptgBuffer[GBUF_DEPTH] != NULL; }
 
 	static void D3D9TechInit(LPDIRECT3DDEVICE9 pDev, const char *folder);
 
@@ -507,6 +557,12 @@ private:
 
 	CAMERA		Camera;
 	D3D9Light*	Lights;
+	// ORO patch (z3): who each scene light belongs to. D3D9Light does not keep its
+	// vObject, and the local-light shadow pass must EXCLUDE the emitter's own vessel
+	// from the caster set - emitter positions are routinely authored INSIDE the hull
+	// (the DG dock light sits in the nose), so an honest self-shadow would black the
+	// whole beam out. Parallel to Lights[], maintained by Add/ClearLocalLights.
+	const vObject* LightOwners[MAX_SCENE_LIGHTS];
 	D3D9Sun	    sunLight;
 
 	VECTOR3		sky_color;
@@ -584,6 +640,52 @@ private:
 	LPDIRECT3DSURFACE9 psWetRefl;		// ORO patch (s) part 6: its level-0 surface (the RT binding)
 	LPDIRECT3DSURFACE9 psWetReflDS;		// ORO patch (s) part 6: its depth-stencil
 	bool bWetReflLive;					// ORO patch (s) part 6: the RT holds this frame's mirror
+	// ORO patch (z3): the local-light shadow map's DEDICATED target. Not one of the
+	// sun's LOD targets on purpose - those are repainted by other passes within the
+	// frame (the patch-(f)/(w) reuse trap), and a dedicated map needs no copy-out.
+	LPDIRECT3DTEXTURE9 ptLclShm;
+	LPDIRECT3DSURFACE9 psLclShm;
+	LPDIRECT3DSURFACE9 psLclShmDS;
+	void RenderLocalLightShadowMap();
+	// ORO patch (z3) round 2c: terrain casters - registered tiles (AddRef'd VB/IB,
+	// released when they age out) + the tiny depth-only tile shader (TileShdVS/PS
+	// in NewPlanet.hlsl). ⚠️ Entries PERSIST for ~2 s after last sighting: the
+	// registration source is the CAMERA's rendered tile set, and without the TTL a
+	// camera rotation churned the caster list and strobed the beam's shadows (his
+	// daylight rotation test). cpos = the camera's GLOBAL position at registration,
+	// so a stale entry's camera-relative mW can be re-anchored when the camera has
+	// TRANSLATED since (world orientation is fixed; only the origin moves).
+	struct LCLTILECASTER {
+		LPDIRECT3DVERTEXBUFFER9 pVB;
+		LPDIRECT3DINDEXBUFFER9 pIB;
+		DWORD nv, nf;
+		D3DXMATRIX mW;
+		DWORD stamp;		// dwFrameId at last registration
+		// ORO patch (ab) rounds 3+4 (2026-09-06): THE TILE RIDES ITS PLANET. A stale entry
+		// used to be re-anchored by the camera's translation through the GLOBAL frame -
+		// but Earth carries the terrain ~150 m per stepped frame at 30 km/s (invariant
+		// 21a's barycentric lesson), so every stale tile sat that far off on the frames
+		// the sim stepped and exact on the others: the KSC blink. Round 3 re-anchored
+		// relative to the planet's POSITION and the blink survived only at high time
+		// warp, where the planet also ROTATES between registration and draw and a
+		// kilometre-wide tile's corners swing metres. So the tile is stored where it
+		// actually lives - in the planet's own frame, origin and basis rows, in DOUBLES
+		// (the planet centre is ~6400 km off, past float's metre) - and each consumer
+		// rebuilds its camera-relative matrix from the planet's CURRENT rotation and
+		// position (OroTileFromPlanet). Exact at any warp; mW stays as the fallback.
+		OBJHANDLE hPlanet;	// the tile's planet
+		VECTOR3 lpos;		// tile origin, planet-local
+		VECTOR3 lrow[3];	// the matrix's three basis rows, planet-local (D3DX is row-vector)
+		D3DXVECTOR3 bs;		// ORO patch (ab): bounding-sphere centre, camera-relative at registration
+		float bsRad;		//   ...and its radius - the consumers filter by range now, not the registrar
+	};
+	mutable std::vector<LCLTILECASTER> LclTiles;	// mutable: fed from the CONST tile render
+	class ShaderClass* pTileShd;
+	class ShaderClass* pTileDepth;	// ORO patch (ab): the tile normal+depth shader (TileDepthVS/PS)
+	void RenderLocalLightShadowMap2(const std::vector<LCLTILECASTER>& tiles);
+	// ORO patch (ab) round 4: the planet-frame store and its inverse - see LCLTILECASTER
+	static void OroTileToPlanet(const D3DXMATRIX& mW, const VECTOR3& cam, LCLTILECASTER& t);
+	static void OroTileFromPlanet(const LCLTILECASTER& t, const VECTOR3& cam, D3DXMATRIX& mW);
 public:
 	// ORO patch (s) part 6: the terrain shader samples the same mirror as the base tiles
 	LPDIRECT3DTEXTURE9 GetWetReflTex() const { return bWetReflLive ? ptWetRefl : NULL; }
@@ -602,6 +704,15 @@ public:
 		return n;
 	}
 	bool IsWetReflLive() const { return bWetReflLive; }
+	// ORO patch (ae): the cascade atlas for the terrain (Surfmgr2) - live only after
+	// RenderCascadeShadows ran this frame
+	bool CascadesLive() const { return cascLive; }
+	// round 8: the local light's shadow map sits in the atlas' spare row this frame
+	// (cell 0 of row 3, half-size) - the terrain samples it there beside the sun's
+	// cascades, no sampler slot borrowed, so the (z3) day gate no longer applies
+	bool CascadeHasLocal() const { return cascLclLive; }
+	LPDIRECT3DTEXTURE9 GetCascadeAtlas() const { return ptCasc; }
+	void GetCascadeConstants(D3DXVECTOR4* basis, D3DXVECTOR4* A, D3DXVECTOR4* tx, D3DXVECTOR4* split, D3DXVECTOR4* atl, bool live) const;
 	// ORO patch (w): the planet-shine shadow map, for assembly members this frame.
 	const SHADOWMAPPARAM* GetPShn(const class vVessel* v) const {
 		return (ptPShn && pshnSet.count(v)) ? &pshn : NULL;
@@ -612,6 +723,85 @@ public:
 		return (sunCpyLive && ptSunCpy && pshnSet.count(v)) ? &sunCpy : NULL;
 	}
 private:
+	// ORO patch (ae): THE CASCADED SUN SHADOW ATLAS (2026-09-06, terrain shadowing mode 3
+	// "Cascaded (ORO)") - one truth for the sun's shadows. Four ortho maps in ONE R32F
+	// texture (2x2 slots of ShadowCascadeSize): slot 0 fitted to the focus vessel's
+	// bounding sphere (stock's fit, the crispest, the grid riding the hull; since round
+	// 5 it carries the focus vessel ALONE), slots 1-3 to camera frustum slices (bounding
+	// spheres, texel-SNAPPED in the planet's frame so the grid never swims as the camera
+	// moves; every caster BUT the focus vessel - its whole shadow lives in slot 0, in
+	// light space a silhouette never leaves its own box). Casters: vessels
+	// (vVessel::Render under RENDERPASS_SHADOWMAP with smap.mViewProj swapped),
+	// base structures (RenderBaseDepth opt 0), terrain tiles (the (z3)/(ab) registry,
+	// rebuilt in the planet's frame). Receivers: terrain, base tiles, and the whole mesh
+	// family (hulls, structures, runways, pads) through one sampler each. In mode 3 the
+	// stencil sheets are not drawn at all; the stock per-vessel maps stay for the hull's
+	// own crisp self-shadow, the cascade term is min()'d onto them.
+	// ROUND 2 (his Brighton Beach flight: nothing beyond 600 m, blobs at 22 m texels):
+	// SIX slots. The atlas is 2 x cascSize square; in quarter-atlas units the two near
+	// cascades take 2x2 (full size), the focus box and the three far cascades 1x1, and
+	// the bottom-right quarter is spare (the light atlas, later). Splits 50 / 450 / 2000
+	// / 8000 m, far = ShadowCascadeFar. The focus slot is ALWAYS fitted.
+	// ROUND 7 (his Brighton Beach telephoto flight, 450 m at FOV 30: the base straddling
+	// the 450 m split, and a landed ShuttleA with NO shadow beyond it): NINE slots in a
+	// 3 x 2 atlas (6144 x 4096 at 2048). Slot 3 (450-2000 m) is full-size now (1 m
+	// texels); slots 6-8 are the boxes of the THREE NEAREST OTHER VESSELS, each hull
+	// alone, vessel-anchored like slot 0 - a parked hull's shadow is crisp from any
+	// distance, which is what the focus vessel already had. EVERY SLOT SHARES ONE LIGHT
+	// BASIS (U, V across the light, L along it): a receiver projects into light space
+	// once, in metres, and each slot is an offset and a scale - two float4 (A = centre
+	// u, centre v, near-plane depth, 1/range; B = atlas u, v offset, slot uv width,
+	// texel) instead of a matrix, so the mesh family sees all nine within ps_3_0's 224
+	// constant registers. And THE RECEIVER-PLANE DEPTH BIAS: the receiver's normal gives
+	// the exact depth its own surface has at each neighbouring texel (g = N.U / N.L per
+	// metre), so the slope term that used to be a blind bias (2.5 texels x tan - 24 m at
+	// slot 3 under a low sun, which is what ate the ShuttleA's 4 m of clearance) is exact
+	// and what remains is under a texel. The bottom row (six cells) is spare - the light
+	// atlas, later.
+	struct CASCADE {
+		D3DXMATRIX  mView, mVP;
+		D3DXVECTOR3 c;
+		float r, zf, texel, range;
+		int   px, py, size;     // the slot's rect in the atlas, pixels
+		float uvx, uvy, scale;  // ...and in uv
+		D3DXVECTOR4 A, B;       // round 7: the receiver's compact form (FitCascade)
+		bool  live;
+	};
+	CASCADE casc[9];
+	D3DXVECTOR3 cascU, cascV, cascL;   // the frame's light basis, shared by every slot
+	class vVessel* cascVes[3];         // the hulls in slots 6-8 this frame
+	// ROUND 5 - THE LATTICE ORIGIN (his round-4 flight: a fast shimmer at every edge up
+	// close, a slow one on the far cascades). The snap quantised the light-space
+	// coordinates of the box centre measured from the PLANET'S CENTRE, in a light basis
+	// fixed in the global frame - and the planet rotates. A lattice anchored 1737 km
+	// away and rotated by omega sweeps the terrain at omega*R: 3.5 m/s on the Moon
+	// (130 texels/s on the near slots = a random rasterisation phase every frame; 0.1-2
+	// texels/s on the far slots = the slow crawl he saw), 460 m/s on Earth. The lattice
+	// must be anchored NEAR the scene: each snapped slot keeps its own planet-local
+	// anchor and walks it to the camera every frame in WHOLE lattice steps (the phase is
+	// preserved, so the walk never pops), so the rotation is applied about a point at
+	// most a texel from the camera and a receiver D metres away sees the lattice move at
+	// D*omega - a texel every ten seconds on Earth's far slots, nothing on the Moon.
+	// Slot 0 is vessel-anchored (stock's fit, no snap) and carries the FOCUS VESSEL
+	// ONLY; slots 1-5 carry everything else; receivers min() the two. A parked hull's
+	// shadow is then rasterised identically every frame, whatever the camera does.
+	VECTOR3   cascAnch[9];      // planet-local lattice origin per slot
+	float     cascAnchTexel[9]; // the texel it was laid down for (a new texel = a new lattice)
+	bool      cascAnchOK[9];
+	OBJHANDLE cascAnchPlanet;
+	float     cascDbgAnchD;     // INSTRUMENT: slot 1's anchor-to-camera distance
+	float cascSplit[4];
+	D3DXVECTOR4 cascAtl;    // the last atlas vector pushed (1/A, -, on, far) - restored after the cockpit pass
+	LPDIRECT3DTEXTURE9 ptCasc;
+	LPDIRECT3DSURFACE9 psCasc, psCascDS;
+	int  cascSize;
+	bool cascLive;
+	bool cascLclLive;
+	void RenderCascadeShadows();
+	// margin = the depth window's extension TOWARD the light (casters outside the box),
+	// reach = its extension PAST the box along the light (receivers beyond the caster)
+	bool FitCascade(int i, const D3DXVECTOR3& c0, float r, float margin, float reach, bool snap);
+	void RenderCascadeCasters(int i);
 	LPDIRECT3DSURFACE9 psShmDS[SHM_LOD_COUNT];
 	LPDIRECT3DSURFACE9 psShmRT[SHM_LOD_COUNT];
 	LPDIRECT3DTEXTURE9 ptShmRT[SHM_LOD_COUNT];

@@ -20,6 +20,10 @@ class SurfTile;
 class CloudTile;
 
 bool FilterElevationPhysics(OBJHANDLE hPlanet, int lvl, int ilat, int ilng, double elev_res, INT16* elev);
+// ORO patch (af) (2026-09-06): the tile's RAW file array (INT16, elev_res units) - the
+// source the CUBIC elevation mode interpolates every file-less child tile from. See
+// FilterElevationFile in VPlanet.cpp.
+bool FilterElevationFile(OBJHANDLE hPlanet, int lvl, int ilat, int ilng, double elev_res, INT16* elev);
 
 
 #define SUN_COLOR 0
@@ -225,6 +229,9 @@ public:
 	~vPlanet ();
 
 	bool			ParseConfig(const char *fname);
+	void			RenderBaseDepth (const LPD3DXMATRIX pVP, int opt = 1);   // ORO patch (z2): opt 1 = GBUF_DEPTH; (z3): opt 0 = a light's shadow map
+					// (public: Scene's NORMAL_DEPTH pass calls it; RenderBaseStructures stays
+					// protected because only vPlanet::Render ever calls that one)
 	virtual bool	GetMinMaxDistance(float *zmin, float *zmax, float *dmin);
 	virtual void	UpdateBoundingBox();
 	virtual void	ReOrigin(VECTOR3 global_pos);

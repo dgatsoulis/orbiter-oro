@@ -37,6 +37,64 @@ float3 Light_fx(float3 x)
 	return saturate(x);  //1.5 - exp2(-x.rgb)*1.5f;
 }
 
+
+// ==========================================================================================================
+// ORO patch (z3) round 2b: the LOCAL-LIGHT shadow map reaches the vessels. One perspective
+// depth map rendered from the frame's strongest shadow-casting SPOT light
+// (Scene::RenderLocalLightShadowMap); gLclShd.x names which of THIS MESH's light slots it
+// shadows (-1 = none; every Mesh.cpp light-upload site sets it), .y = 1/mapsize.
+// Same depth convention as the sun's map (ShdMapPS stores 1 - z/w); tex2Dlod because the
+// call sits behind a comparison on a float uniform - dynamic flow, and ps_3_0 refuses
+// divergent gradients there (the map has one mip anyway). Returns the LIT factor.
+// ==========================================================================================================
+
+uniform extern float4x4 gLclShdVP;
+uniform extern float4   gLclShd = {-1.0, 0.0, 0.0, 0.0};
+uniform extern texture  gLclShmTex;
+
+sampler LclShmS = sampler_state
+{
+	Texture = <gLclShmTex>;
+	MinFilter = POINT;
+	MagFilter = POINT;
+	MipFilter = NONE;
+	AddressU = CLAMP;
+	AddressV = CLAMP;
+};
+
+float SampleLocalShadowV(float3 posW, float3 nrmW, float dstL, float nl)
+{
+	// NORMAL-OFFSET (gLclShd.z = world texel per metre of light distance): push the
+	// receiver point ~2 map texels out along its surface normal - the ordinary-acne
+	// cure. Curved hulls always carry a grazing band, so the vessel receivers get
+	// the same laws as the terrain (see NewPlanet.hlsl's twin for the full story).
+	posW += nrmW * (dstL * gLclShd.z * 2.0f);
+
+	float4 q = mul(float4(posW, 1.0f), gLclShdVP);
+	if (q.w < 0.001f) return 1.0f;						// behind the light: lit
+	q.xyz /= q.w;
+	float2 sp = q.xy * float2(0.5f, -0.5f) + 0.5f;
+	if (sp.x < 0 || sp.x > 1 || sp.y < 0 || sp.y > 1) return 1.0f;	// outside the map: lit
+	if (q.z < 0 || q.z > 1) return 1.0f;
+
+	float pd = (1.0f - q.z) * 1.012f + 0.0008f;
+
+	// TEXEL-FOOTPRINT BIAS - the grazing cure, NewPlanet.hlsl's twin: clear
+	// exactly the ray-depth span one PCF-widened texel covers on this surface.
+	float grz = sqrt(saturate(1.0f - nl * nl)) / max(nl, 0.05f);
+	pd += (gLclShd.z * 3.0f) * grz * gLclShd.w / max(dstL, 1.0f);
+
+	float2 dx = float2(gLclShd.y, 0) * 1.5f;
+	float2 dy = float2(0, gLclShd.y) * 1.5f;
+	float  va = 0;
+	if (tex2Dlod(LclShmS, float4(sp - dx, 0, 0)).r > pd) va++;
+	if (tex2Dlod(LclShmS, float4(sp + dx, 0, 0)).r > pd) va++;
+	if (tex2Dlod(LclShmS, float4(sp - dy, 0, 0)).r > pd) va++;
+	if (tex2Dlod(LclShmS, float4(sp + dy, 0, 0)).r > pd) va++;
+	return 1.0f - va * 0.25f;
+}
+
+
 void LocalLights(
 	out float3 diff_out,
 	out float3 spec_out,
@@ -95,6 +153,20 @@ void LocalLights(
 
 		spe = pow(saturate(spe), sp);
 		spe *= (att*spt);
+	}
+
+	// ORO patch (z3) round 2b: the shadow-mapped slot loses its light behind a caster.
+	// x is a compile-time block offset, so the range guard folds away for the block
+	// that cannot hold the slot; the select mask stands in for dynamic indexing and
+	// fishes out the slot's light distance for the normal-offset.
+	if (gLclShd.x > (x - 0.5f) && gLclShd.x < (x + 3.5f)) {
+		float4 sel = float4(abs(gLclShd.x - x - 0.0f) < 0.5f, abs(gLclShd.x - x - 1.0f) < 0.5f,
+		                    abs(gLclShd.x - x - 2.0f) < 0.5f, abs(gLclShd.x - x - 3.0f) < 0.5f);
+		float3 pK = p[0]*sel.x + p[1]*sel.y + p[2]*sel.z + p[3]*sel.w;
+		float shd = SampleLocalShadowV(posW, nrmW, dot(dst, sel), dot(-pK, nrmW));
+		float4 m = lerp(float4(1, 1, 1, 1), shd.xxxx, sel);
+		dif *= m;
+		if (bSpec) spe *= m;
 	}
 
 	diff_out = 0;
@@ -188,6 +260,18 @@ void LocalLightsBeckman(
 	}
 
 	dif *= (att*spt);
+
+	// ORO patch (z3) round 2b: the shadow-mapped slot loses its light behind a caster.
+	// This path SQUARES the diffuse factor at accumulation (Sq below), so dif takes
+	// sqrt(shd) to land the shadow linear - matching the plain LocalLights depth.
+	if (gLclShd.x > (x - 0.5f) && gLclShd.x < (x + 3.5f)) {
+		float4 sel = float4(abs(gLclShd.x - x - 0.0f) < 0.5f, abs(gLclShd.x - x - 1.0f) < 0.5f,
+		                    abs(gLclShd.x - x - 2.0f) < 0.5f, abs(gLclShd.x - x - 3.0f) < 0.5f);
+		float3 pK = p[0]*sel.x + p[1]*sel.y + p[2]*sel.z + p[3]*sel.w;
+		float shd = SampleLocalShadowV(posW, nrmW, dot(dst, sel), dot(-pK, nrmW));
+		dif *= lerp(float4(1, 1, 1, 1), sqrt(shd).xxxx, sel);
+		if (bSpec) spe *= lerp(float4(1, 1, 1, 1), shd.xxxx, sel);
+	}
 
 	diff_out = 0;
 	spec_out = 0;

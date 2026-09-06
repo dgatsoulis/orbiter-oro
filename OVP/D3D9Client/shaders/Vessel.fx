@@ -79,15 +79,18 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
 	else		   cRefl = gMtrl.reflect.rgb;
 
 	// Sample emission map. (Note: Emissive materials and textures need to go different stages, material is added to light)
-	if (gCfg.Emis) cEmis = tex2D(EmisS, frg.tex0.xy).rgb;
+	if (gCfg.Emis) cEmis = tex2D(EmisS, frg.tex0.xy).rgb * gBaseGlow;   // ORO patch (ac): 1 on vessels
 	else		   cEmis = 0;
 
 
 	float3 nrmW = frg.nrmW;
 	float3 tanW = frg.tanW.xyz;
-	float3 cSun = saturate(gSun.Color) * (1.0f - gStorm);   // ORO patch (s) part 2: overcast
+	// ORO patch (aa): the fog, up front - the direct sun through the column above the pixel.
+	float  fogT = 1.0f, fogSun = 1.0f; float3 cFog = 0;
+	OroFog(-frg.camW, -gSun.Dir, fogT, fogSun, cFog);
+	float3 cSun = saturate(gSun.Color) * (1.0f - gStorm) * fogSun;   // ORO patch (s) part 2 + (aa)
 	float3 CamD = normalize(frg.camW);
-	float3 Base = (gMtrl.ambient.rgb*gSun.Ambient*(1.0f + gStorm * 1.8f)) + (gMtrl.emissive.rgb);
+	float3 Base = (gMtrl.ambient.rgb*gSun.Ambient*(1.0f + gStorm * 1.8f)*(1.0f + gFogLift * (1.0f - fogSun))) + (gMtrl.emissive.rgb);
 
 
 	// Compute World space normal -------------------------------------------
@@ -129,16 +132,20 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
 	// Add vessel self-shadows
 	// ----------------------------------------------------------------------
 
-#if SHDMAP > 0
 	{
-		float fShd = ComputeShadow(frg.shdH, dLN, sc);
+		float fShd = 1.0f;        // ORO patch (ae): the cascade term outside the SHDMAP block (see PBR.fx)
+#if SHDMAP > 0
+		fShd = ComputeShadow(frg.shdH, dLN, sc);
+#endif
+#if defined(_CASCADE)
+		fShd = min(fShd, OroCascadeShadow(-frg.camW, nrmW, -gSun.Dir));   // ORO patch (ae): the world's shadows on the hull
+#endif
 		cSun.rgb *= fShd;
 		// ORO patch (p): let the shadow eat the AMBIENT share of Base too. Base is
 		// (ambient + emissive), so subtracting at most the ambient part can never take
 		// Base below emissive and never goes negative.
 		Base -= (gMtrl.ambient.rgb * gSun.Ambient) * ((1.0f - fShd) * gVCShdDepth);
 	}
-#endif
 
 
 
@@ -153,6 +160,9 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
 	// ORO patch (r): same emissive-overdrive fix as PBR.fx - see the long note there. This
 	// is the LEGACY path (SHADER_LEGACY); a plain mesh defaults to SHADER_PBR, so this copy
 	// exists so the behaviour does not depend on which shader a given mesh happens to take.
+	// ORO patch (aa): SNOW COVER on the up-facing hull - dormant at gSnow.x 0
+	[branch] if (gSnow.x > 0.0f)
+		cTex.rgb = lerp(cTex.rgb, ORO_SNOW_ALBEDO, OroSnowMask(nrmW, gFogCam.xyz, 1e9f, frg.tex0.xy * 24.0f));
 	float3 cAlbedo = cTex.rgb;			// texture colour before lighting
 	cTex.rgb *= saturate(Base + gMtrl.diffuse.rgb * Light_fx(cDiffLocal + cSun * dLN));
 	cTex.rgb += cAlbedo * max(gMtrl.emissive.rgb - 1.0f, 0.0f);
@@ -273,6 +283,7 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
 
 	cTex.rgb *= gSun.Transmission;
 	cTex.rgb += gSun.Inscatter;
+	cTex.rgb = lerp(cTex.rgb, cFog, 1.0f - fogT);   // ORO patch (aa): the fog goes on last
 
 	return cTex;
 }
