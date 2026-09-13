@@ -829,8 +829,8 @@ void SurfTile::Render ()
 	// and must still block it. Main scene only, or mirror/probe passes double-add.
 	if (scene->GetRenderPass() == RENDERPASS_MAINSCENE) {
 		bool want = false;
-		const Scene::LOCALSHADOWPARAM* lsq = scene->GetLocalShadowData();
-		if (lsq->idx >= 0) {
+		for (int k = 0; k < scene->GetLocalShadowCount() && !want; k++) {	// ORO patch (ah) step 4: any of the maps
+			const Scene::LOCALSHADOWPARAM* lsq = scene->GetLocalShadowMap(k);
 			D3DXVECTOR3 lrel = bs_pos - lsq->pos;
 			if (D3DXVec3Length(&lrel) < lsq->range + mesh->bsRad) want = true;
 		}
@@ -1060,7 +1060,12 @@ void SurfTile::Render ()
 
 	LightF Locals;
 	BOOL Spots[4];
-	int lsSlot = -1;	// ORO patch (z3): which of THIS TILE's four light slots is the shadow-mapped one
+	bool lsAny = false;	// ORO patch (ah) step 4: any of THIS TILE's lights owns a spot shadow map this frame
+	// the maps are read from the cascade atlas in mode 3 (main scene, atlas live - nothing borrowed,
+	// no day gate); in modes 0-2 the local texture BORROWS the tShadowMap slot, at night only
+	const bool viaAtlas = (Config->TerrainShadowing == 3) && scene->CascadesLive() && scene->CascadeHasLocal()
+	                   && (scene->GetRenderPass() == RENDERPASS_MAINSCENE);
+	const bool lclOK = viaAtlas || (Config->TerrainShadowing != 3 && scene->LocalShadowTerrainOK());
 
 	if (cfg != PLT_GIANT)
 	{
@@ -1103,32 +1108,21 @@ void SurfTile::Render ()
 					nMeshLights = min(nMeshLights, 4);
 
 					// Create a list of N most effective lights ---------------------------------------------
-					// ORO patch (z3): each tile picks its own four, so the frame's
-					// shadow-mapped scene light lands in a DIFFERENT slot per tile
-					// (or in none) - match by scene index here, where both are known.
-					const Scene::LOCALSHADOWPARAM* lsp = scene->GetLocalShadowData();
-					// ORO patch (ae) round 8: in mode 3 the local map sits IN the cascade
-					// atlas (Scene::RenderCascadeShadows), so the terrain samples it
-					// beside the sun's cascades with no slot borrowed - and no day gate.
-					// Main scene only: a probe's constants carry no atlas (vCascAtlas
-					// pushes dead there), so a probe keeps the borrow path below.
-					const bool viaAtlas = (Config->TerrainShadowing == 3) && scene->CascadesLive() && scene->CascadeHasLocal()
-					                   && (scene->GetRenderPass() == RENDERPASS_MAINSCENE);
 					for (int i = 0; i < nMeshLights; i++)
 					{
 						auto pL = pLights[LightList[i].idx];
-						Locals.attenuation[i] = pL.Attenuation;
+						// ORO patch (ah): the scene light is four float4 now; the terrain keeps its own
+						// LightF layout (a separate compile unit), so unpack into it here. Step 4: the
+						// FALLOFF lane (never read) carries the light's spot shadow map, cell + 1, when
+						// this tile may read the maps this frame (see lclOK above); 0 = none.
+						const float shd = lclOK ? pL.Diffuse.a : 0.0f;
+						if (shd > 0.5f) lsAny = true;
+						Locals.attenuation[i] = float3(pL.Attenuation.x, pL.Attenuation.y, pL.Attenuation.z);
 						Locals.diffuse[i] = FVECTOR4(pL.Diffuse).rgb;
-						Locals.direction[i] = pL.Direction;
-						Locals.param[i] = pL.Param;
-						Locals.position[i] = pL.Position;
+						Locals.direction[i] = pL.Dir3();
+						Locals.param[i] = float4(pL.GetRange(), shd, pL.Direction.w, pL.Position.w);	// range, shadow map, theta, phi
+						Locals.position[i] = pL.Pos3();
 						Spots[i] = (pL.Type == 1);
-						// terrainOK (2026-09-05, the day split): in daylight the map
-						// still builds and vessels receive, but the TERRAIN slot
-						// borrow stays night-only - it evicts the sun map, and losing
-						// the vessel's sun shadow in daylight is the flown regression
-						// the old whole-system gate existed for.
-						if ((lsp->terrainOK || viaAtlas) && LightList[i].idx == lsp->idx) lsSlot = i;
 					}
 
 					// Enable local lights and feed data to shader
@@ -1187,7 +1181,8 @@ void SurfTile::Render ()
 			float wrp[4] = { 1.0f / (float)scene->ViewW(), 1.0f / (float)scene->ViewH(),
 			                 g_gcWetRefl, pWR ? 1.0f : 0.0f };
 			float wsp[4] = { g_gcWetSwimAmp, g_gcWetSwimRate, g_gcWetPoolSize, g_gcWetPoolReach };
-			float wgp[4] = { g_gcWetGrainOp, g_gcWetGrainSize, g_gcWetBlur, 0.0f };
+			extern float g_oroWaterMirrorK;   // ORO 2026-09-10: the water mirror strength rides .w (see Scene.cpp)
+			float wgp[4] = { g_gcWetGrainOp, g_gcWetGrainSize, g_gcWetBlur, g_oroWaterMirrorK };
 			pShader->SetPSConstants("gWetReflPrm", wrp, sizeof(wrp));
 			pShader->SetPSConstants("gWetSwimPrm", wsp, sizeof(wsp));
 			pShader->SetPSConstants("gWetGrainPrm", wgp, sizeof(wgp));
@@ -1204,35 +1199,22 @@ void SurfTile::Render ()
 		pShader->SetPSConstants(pShader->Lights, &Locals, sizeof(Locals));
 		pShader->SetPSConstants(pShader->Spotlight, Spots, sizeof(Spots));
 
-		// ORO patch (z3): hand the tile the local-light shadow map. Constants set BY
-		// NAME rather than growing the mirrored ShaderParams struct - the patch (s)
-		// rule. vLShd.x is the slot (-1 = no shadowed light on this tile) and must be
-		// written EVERY tile, or a tile outside the beam inherits its neighbour's.
-		// ⚠️ THE MAP RIDES THE tShadowMap SLOT: the Earth config with _DEVTOOLS sits
-		// at EXACTLY ps_3_0's 16-sampler ceiling in stock (X4510 with a 17th sampler,
-		// flown), so a tile with a shadowed local light REBINDS tShadowMap to the
-		// local map and yields its sun-map shadow (bShadows off) for the frame - a
-		// beam-lit tile, which matters at night, where the sun term is ~0 anyway.
-		// This runs AFTER the sun's own bind above and BEFORE the Flow upload below,
-		// so both the binding and the flag land in the right order.
-		{
-			const Scene::LOCALSHADOWPARAM* lsp = scene->GetLocalShadowData();
-			FVECTOR4 lv((float)lsSlot, 0.0f, 0.0f, 0.0f);
-			if (lsSlot >= 0) {
-				lv.y = 1.0f / (float)lsp->size;
-				lv.z = lsp->texel;		// the normal-offset + footprint-bias scale
-				lv.w = lsp->kdepth;		// metres-along-ray -> 1-z/w units
-				pShader->SetPSConstants("mLsVP", (void*)&lsp->mViewProj, sizeof(D3DXMATRIX));
-				// round 8: with the map in the atlas (mode 3, main scene) the slot stays
-				// the atlas' and the sun keeps its shadow; the shader reads the cell
-				const bool viaAtlas = (Config->TerrainShadowing == 3) && scene->CascadesLive() && scene->CascadeHasLocal()
-				                   && (scene->GetRenderPass() == RENDERPASS_MAINSCENE);
-				if (!viaAtlas) {
-					pShader->SetTexture(pShader->tShadowMap, lsp->pShadowMap, IPF_CLAMP | IPF_LINEAR);
-					fc->bShadows = false;
-				}
+		// ORO patch (z3) / (ah) step 4: the spot shadow maps. Their frames were pushed once per
+		// planet render (below, with the cascade constants); a tile carries each light's map in
+		// its Falloff lane. IN MODES 0-2 THE MAPS RIDE THE tShadowMap SLOT: the Earth config
+		// with _DEVTOOLS sits at EXACTLY ps_3_0's 16-sampler ceiling in stock (X4510 with a 17th
+		// sampler, flown), so a tile with a shadowed light REBINDS tShadowMap to the local texture
+		// and yields its sun-map shadow (bShadows off) for the frame - a beam-lit tile, which
+		// matters at night, where the sun term is ~0 anyway (the gate is lclOK's). In mode 3 the
+		// atlas is already the bound sun map and nothing is borrowed. This runs AFTER the sun's own
+		// bind above and BEFORE the Flow upload below, so both land in the right order.
+		if (lsAny && !viaAtlas) {
+			D3DXVECTOR4 P[6], Dd[6], A, B; LPDIRECT3DTEXTURE9 tex = NULL;
+			scene->GetLocalShadowConstants(P, Dd, &A, &B, &tex, false);
+			if (tex) {
+				pShader->SetTexture(pShader->tShadowMap, tex, IPF_CLAMP | IPF_LINEAR);
+				fc->bShadows = false;
 			}
-			pShader->SetPSConstants("vLShd", &lv, sizeof(lv));
 		}
 	}
 
@@ -1540,6 +1522,18 @@ void TileManager2<SurfTile>::Render (MATRIX4 &dwmat, bool use_zbuf, const vPlane
 		pShader->SetPSConstants("vCascTx", tx, sizeof(tx));
 		pShader->SetPSConstants("vCascSplit", &split, sizeof(split));
 		pShader->SetPSConstants("vCascAtlas", &atl, sizeof(atl));
+	}
+	// ORO patch (ah) step 4: the spot shadow maps' frames, once per planet render (two float4 per
+	// map, the count compiled in as _LCL2/_LCL4/_LCL6 - see NewPlanet.hlsl). Set BY NAME, not through
+	// the mirrored Prm struct - the patch (s) rule.
+	{
+		D3DXVECTOR4 P[6], Dd[6], A, B; LPDIRECT3DTEXTURE9 tex = NULL;
+		scene->GetLocalShadowConstants(P, Dd, &A, &B, &tex, false);
+		const int n = Config->LocalLightShadows ? max(1, min(6, Config->LocalLightShadowMaps)) : 1;
+		pShader->SetPSConstants("vLclP", P, sizeof(D3DXVECTOR4) * n);
+		pShader->SetPSConstants("vLclD", Dd, sizeof(D3DXVECTOR4) * n);
+		pShader->SetPSConstants("vLclShd", &A, sizeof(A));
+		pShader->SetPSConstants("vLclAtl", &B, sizeof(B));
 	}
 	pShader->GetDevice()->SetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);
 

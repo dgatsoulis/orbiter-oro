@@ -942,6 +942,210 @@ void vPlanet::RenderZRange (double *nplane, double *fplane)
 
 // ==============================================================
 
+// ============================================================================
+// ORO patch (aj) round 2: WHERE THE NEAR-FIELD SEAM SITS, in real metres. The planet pass
+// cut the sheet at its near plane over this planet's dist_scale; the ORO path raises the
+// seam to RING_NEAR_SEAM_M so the precise local disc covers everything close enough for
+// the giant mesh's float error to show (flight 8, the cockpit views: with Detail at 2 the
+// finest octaves just past a 26 km cut are 2-3 px wide, and the mesh's ~8 m of per-frame
+// rounding is a visible fraction of that - a jitter; at 100 km the same 8 m is under a
+// twentieth of the finest admitted feature). The stock path keeps the pass's own cut -
+// it has no crossfade, so a raised seam would double-blend the band between. 0 = no cut
+// (probe and mirror passes, which draw whole rings on one frustum).
+//
+// !! 600 km, NOT 100 (flight 11: "shimmering has been reintroduced... that band in the
+// middle not lining up"). The band WAS the crossfade band, 100-120 km out: inside it the
+// planet pass's side still came from the giant mesh, misregistered by its 8 m against the
+// disc's exact pattern and vibrating with it, and with Detail raised the features there
+// were 230 m - 8 m is a visible fraction. The far mesh must never carry a feature the error
+// can move: at 600 km the finest octave the fade still admits is a kilometre wide, 8 m is
+// under one percent of it, and the disc is exact out there because its coordinates are its
+// own (a 1,300 km vertex is 0.08 m in float32). Capped so the disc never reaches the
+// planet's body (0.45 of the distance to its surface, through the pass's own scale, the
+// cockpit views' z-buffer holding the planet at scaled depth).
+static const double RING_NEAR_SEAM_M = 6.0e5;
+static inline double OroRingNearCut(float passNear, float distScale, bool oroPath, double camDist, double radius)
+{
+	if (passNear <= 0.0f || distScale <= 0.0f) return 0.0;
+	const double z = double(passNear) / double(distScale);
+	if (!oroPath) return z;
+	const double cap = 0.45 * double(distScale) * max(camDist - radius, 1.0);
+	return max(z, min(RING_NEAR_SEAM_M, cap));
+}
+
+// ============================================================================
+// ORO patch (aj): THE RING BRACKET, factored (round 2) so the near-field draw below can
+// re-arm it after Render has cleared it. Returns false when the addon has pushed no look
+// for this planet (the stock ring path), in which case nothing is bound.
+//
+bool vPlanet::PushRingBracket(float cut)
+{
+	const OroRingLook* oroRing = ringmgr ? gcGetRingLook(hObj) : NULL;
+	if (!oroRing) return false;
+	// ROUND 2, THE SEAM: camera forward + the near-field cut depth, signed by which side of
+	// the seam this draw is on (the shader crossfades the two draws across [cut, 1.2 cut]).
+	{
+		const D3DXVECTOR3* cz = scn->GetCameraZ();
+		D3D9Effect::FX->SetVector(D3D9Effect::eRingCut, ptr(D3DXVECTOR4(cz->x, cz->y, cz->z, cut)));
+	}
+	const float rr = float(size);
+	const VECTOR3 nrm = mul(grot, _V(0, 1, 0));                 // ring plane normal, world
+	const float ir = float(ringmgr->InnerRad()) * rr, orr = float(ringmgr->OuterRad()) * rr;
+	D3D9Effect::FX->SetVector(D3D9Effect::eRingPrm, ptr(D3DXVECTOR4(oroRing->prm[0], oroRing->prm[1], oroRing->prm[2], oroRing->prm[3])));
+	D3D9Effect::FX->SetVector(D3D9Effect::eRingRad, ptr(D3DXVECTOR4(ir, orr, 1.0f / max(1.0f, orr - ir), 0.0f)));
+	D3D9Effect::FX->SetVector(D3D9Effect::eRingShd, ptr(D3DXVECTOR4(float(nrm.x), float(nrm.y), float(nrm.z), 0.0f)));
+	D3D9Effect::FX->SetTexture(D3D9Effect::eRingProf, oroRing->pProfile);
+	// ROUND 2 - THE CLOSE-UP. The sheet grows grooves, grain and specks in its own texture
+	// as the camera approaches, and the grain's coordinates are built CAMERA-RELATIVE in
+	// the shader: the camera's radial and along-track directions in the ring plane go in
+	// here (the addon cannot know the render camera; the client can), the two amplitudes
+	// and the CPU-reduced pattern offsets come from the addon's lanes 4..11. A vector of
+	// metres from the eye keeps full float precision where the detail is visible; the
+	// planet-relative position the round-1 terms use is 1.2e8 m and only good to 8 m.
+	{
+		VECTOR3 crel = -cpos;                                    // camera relative to the planet
+		VECTOR3 cpl  = crel - nrm * dotp(crel, nrm);             // projected into the ring plane
+		const double cr = length(cpl);
+		if (cr > 1.0) {
+			const VECTOR3 axR = cpl / cr;
+			const VECTOR3 axT = crossp(nrm, axR);                // +azimuth, the addon's convention
+			D3D9Effect::FX->SetVector(D3D9Effect::eRingAxR, ptr(D3DXVECTOR4(float(axR.x), float(axR.y), float(axR.z), 0.0f)));
+			D3D9Effect::FX->SetVector(D3D9Effect::eRingAxT, ptr(D3DXVECTOR4(float(axT.x), float(axT.y), float(axT.z), 0.0f)));
+		}
+		D3D9Effect::FX->SetVector(D3D9Effect::eRingPrm2, ptr(D3DXVECTOR4(oroRing->prm[4], oroRing->prm[5], oroRing->prm[6], oroRing->prm[7])));
+		D3D9Effect::FX->SetVector(D3D9Effect::eRingPrm3, ptr(D3DXVECTOR4(oroRing->prm[8], oroRing->prm[9], oroRing->prm[10], oroRing->prm[11])));
+		D3D9Effect::FX->SetVector(D3D9Effect::eRingPrm4, ptr(D3DXVECTOR4(oroRing->prm[12], oroRing->prm[13], oroRing->prm[14], oroRing->prm[15])));   // relief + reserved
+	}
+	return true;
+}
+
+void vPlanet::ClearRingBracket()
+{
+	D3D9Effect::FX->SetVector(D3D9Effect::eRingPrm, ptr(D3DXVECTOR4(0, 0, 0, 0)));
+	D3D9Effect::FX->SetVector(D3D9Effect::eRingPrm2, ptr(D3DXVECTOR4(0, 0, 0, 0)));   // round 2: detail off too
+	D3D9Effect::FX->SetVector(D3D9Effect::eRingCut, ptr(D3DXVECTOR4(0, 0, 0, 0)));    // round 2: no seam
+	D3D9Effect::FX->SetVector(D3D9Effect::eRingPrm4, ptr(D3DXVECTOR4(0, 0, 0, 0)));   // round 2: no relief
+	D3D9Effect::FX->SetTexture(D3D9Effect::eRingProf, NULL);
+}
+
+// ============================================================================
+// ORO patch (aj) round 2: THE NEAR-FIELD RING - the part of the sheet the planet pass
+// cannot draw. In the main scene's z-clear mode (external view with the target more than
+// 2 km up - at a ringed planet, always) Scene renders every planet with a 1 km near
+// plane for depth precision and then clears the z-buffer for the vessels. A ring drawn
+// inside the planet pass is therefore CUT along a straight line wherever the sheet comes
+// nearer than 1 km - which, for a camera inside the ring, is most of what it should be
+// looking at (his flight-3 screenshots: the sheet ending in a straight edge short of the
+// ship, then a thin band, then nothing). Stock behaviour; nobody had flown a camera into
+// a ring before.
+// The fix is a FOURTH ring draw, after the hulls, on the vessel frustum: depth TEST on so
+// a hull above the plane hides the sheet behind it, depth WRITE off so a hull below it
+// still shows through (the sheet is translucent), and a user clip plane keeping only
+// what lies NEARER than the depth the planet pass cut at - so the two draws tile the
+// sheet with neither a gap nor a double-blended seam (both clip on the same view-space
+// depth). Both halves go through the same RingManager::Render, so the stock techniques
+// get it too: the cut was theirs before it was ours.
+// !! THE PLANET IS DISTANCE-SCALED, AND THAT IS WHERE THE CUT REALLY WAS (his second set
+// of screenshots, after a first build that refused scaled planets). maxdist is the
+// planet's radius + 10 km (max_surf_dist), so a camera 115,000 km out at Saturn's rings
+// is "far": the whole planet, rings included, is drawn shrunk toward the eye by
+// dist_scale (0.039 there) - perspective-invariant, so nothing LOOKS different, but the
+// planet pass's 1 km near plane then cuts the REAL sheet at 1 km / dist_scale, some
+// 25 km, which is what the pictures measured. So this draw works in REAL metres: the cut
+// depth is zPlanetNear / dist_scale, the world matrix is mWorld with the scale taken back
+// out of all twelve affine entries (radius and translation both carry it), and the
+// shader's gDistScale is 1. The clip plane is computed here, per planet, because the
+// scale is per planet. The gate is geometric: nothing on the plane can be within zcut of
+// depth unless the camera is within ~2 zcut of the plane.
+//
+// !! FLIGHT 5 (the same day) ADDED TWO THINGS. (1) THE LOCAL DISC: the giant ring mesh's
+// vertices are 100,000 km away, so a fragment's camera-relative position is float32-
+// interpolated with ~8 m of error that re-rounds every frame - under a pixel at 25 km,
+// ten pixels at 1 km, and the grain and specks VIBRATED. The ORO path now draws the near
+// field on a unit half-disc whose world matrix carries the reach as its scale and the
+// camera's foot point on the plane as its translation (RingManager::RenderNearField):
+// small vertices, millimetre positions. The stock path (no look pushed) keeps the giant
+// mesh - its texture is 8.5 km per texel and cannot show 8 m. (2) THE SEAM CROSSFADE:
+// butted on one depth the two draws met on a hairline carrying the planet pass's float
+// error; they now overlap over [zcut, 1.2 zcut] and RingTechOROPS crossfades them with
+// the exact complementary alpha (gRingCut, pushed by the bracket with the sign saying
+// which side this draw is), so the planet pass's hard clip edge is at alpha 0.
+//
+void vPlanet::RenderRingsNearField(LPDIRECT3DDEVICE9 dev, float zPlanetNear)
+{
+	if (!ringmgr || dist_scale <= 0.0f || zPlanetNear <= 0.0f) return;
+	const float  s    = dist_scale;
+	const bool   oro  = (gcGetRingLook(hObj) != NULL);
+	const double zcut = OroRingNearCut(zPlanetNear, s, oro, cdist, size);   // the seam, real metres (see OroRingNearCut)
+	const VECTOR3 nrm = mul(grot, _V(0, 1, 0));
+	const double  h   = dotp(-cpos, nrm);                     // camera's height over the plane (signed)
+	if (fabs(h) > 2.0 * zcut) return;                         // nothing on the plane can be that near
+
+	// this planet's own camera uniforms (gCameraPos, gRadius - the ring shader's radius
+	// comes from them): the planet loop may have left a moon's behind. Handed back below.
+	D3D9Effect::UpdateEffectCamera(hObj);
+	D3D9Effect::FX->SetFloat(D3D9Effect::eDistScale, 1.0f);
+	const bool oroRing = PushRingBracket(float(-zcut));       // the near-field draw: fade OUT past zcut
+
+	// the clip plane: the ORO path keeps to the crossfade band (alpha is 0 past 1.2 zcut
+	// anyway); the stock path, with no crossfade, overlaps the planet pass by a hair so the
+	// float error of the two clips can never open a gap. The planar mirror's recipe: with
+	// shaders active D3D9 clip planes live in clip space, inverse-transpose of the VP; the
+	// world is camera-centred, so depth = dot(p, camera z); keep depth <= zclip.
+	const double zclip = oroRing ? zcut * 1.25 : zcut * 1.001;
+	const D3DXVECTOR3* cz = scn->GetCameraZ();
+	D3DXPLANE pw(-cz->x, -cz->y, -cz->z, float(zclip));
+	D3DXMATRIX mI; D3DXMatrixInverse(&mI, NULL, scn->GetProjectionViewMatrix());
+	D3DXMatrixTranspose(&mI, &mI);
+	D3DXPLANE cp; D3DXPlaneTransform(&cp, &pw, &mI);
+	HR(dev->SetClipPlane(0, (const float*)&cp));
+	HR(dev->SetRenderState(D3DRS_CLIPPLANEENABLE, 1));
+
+	D3D9Mesh::bRingNearField = true;
+	if (oroRing) {
+		// THE LOCAL DISC: an in-plane basis from the camera forward (any orthonormal pair in
+		// the plane will do - CullMode is NONE and the disc is drawn in both halves), scaled
+		// by the reach, placed at the camera's foot point (camera-relative: -h * normal).
+		// Reach 2.2 zcut: a point at depth <= 1.25 zcut lies within 1.25 zcut / cos(50 deg)
+		// of the eye at the widest view Orbiter allows, and closer still to the foot point.
+		VECTOR3 fwd = _V(cz->x, cz->y, cz->z);
+		VECTOR3 e1 = crossp(nrm, fwd);
+		double  l1 = length(e1);
+		if (l1 < 1e-3) { e1 = crossp(nrm, _V(1, 0, 0)); l1 = length(e1); }
+		if (l1 < 1e-3) { e1 = crossp(nrm, _V(0, 0, 1)); l1 = length(e1); }
+		e1 = e1 / l1;
+		const VECTOR3 e2 = crossp(e1, nrm);
+		const double  R  = 2.2 * zcut;
+		D3DXMATRIX W; D3DXMatrixIdentity(&W);
+		W._11 = float(e1.x * R);   W._12 = float(e1.y * R);   W._13 = float(e1.z * R);
+		W._21 = float(nrm.x * R);  W._22 = float(nrm.y * R);  W._23 = float(nrm.z * R);
+		W._31 = float(e2.x * R);   W._32 = float(e2.y * R);   W._33 = float(e2.z * R);
+		W._41 = float(-nrm.x * h); W._42 = float(-nrm.y * h); W._43 = float(-nrm.z * h);
+		ringmgr->RenderNearField(dev, W);
+	}
+	else {
+		// THE STOCK PATH: the giant mesh with the distance scale divided back out of all
+		// twelve affine entries (radius and translation both carry it), in real metres.
+		D3DXMATRIX mW = mWorld;
+		if (s != 1.0f) {
+			const float k = 1.0f / s;
+			mW._11 *= k; mW._12 *= k; mW._13 *= k;
+			mW._21 *= k; mW._22 *= k; mW._23 *= k;
+			mW._31 *= k; mW._32 *= k; mW._33 *= k;
+			mW._41 *= k; mW._42 *= k; mW._43 *= k;
+		}
+		ringmgr->Render(dev, mW, false);
+		ringmgr->Render(dev, mW, true);
+	}
+	D3D9Mesh::bRingNearField = false;
+	HR(dev->SetRenderState(D3DRS_CLIPPLANEENABLE, 0));
+	dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);
+	dev->SetRenderState(D3DRS_ZENABLE, TRUE);                 // the override's states, back to the device defaults
+	dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+	if (oroRing) ClearRingBracket();
+	D3D9Effect::UpdateEffectCamera(scn->GetCameraProxyBody());   // hand the effect camera back to the frame's proxy
+}
+
 bool vPlanet::Render(LPDIRECT3DDEVICE9 dev)
 {
 	_TRACE;
@@ -1016,6 +1220,15 @@ bool vPlanet::Render(LPDIRECT3DDEVICE9 dev)
 		SetupEclipse();
 
 		if (scn->GetRenderPass() == RENDERPASS_MAINSCENE) UpdateScatter();
+
+		// ORO patch (aj): THE RING BRACKET. One push per ringed planet serves three readers -
+		// the far ring half, the planet's own shadow pass (PlanetTechPS), the near ring half -
+		// and is CLEARED after the near half (gRingPrm.x = 0), the patch (p) lesson: a scoped
+		// uniform, or every other legacy planet's pass would test against Saturn's rings.
+		// Probe and mirror passes come through here too, so a reflection agrees with the sky.
+		// Factored into PushRingBracket/ClearRingBracket (round 2) because a FOURTH reader,
+		// the near-field draw after the vessels, re-arms it - see RenderRingsNearField.
+		const bool oroRing = PushRingBracket(float(OroRingNearCut(scn->GetRingNearCut(), dist_scale, true, cdist, size)));   // the planet pass: fade IN past the seam (0 = none)
 
 		if (ringmgr) {
 			ringmgr->Render(dev, mWorld, false);
@@ -1095,6 +1308,8 @@ bool vPlanet::Render(LPDIRECT3DDEVICE9 dev)
 			ringmgr->Render (dev, mWorld, true);
 			dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);
 		}
+		// ORO patch (aj): close the ring bracket - blend 0 is "no ring" for every reader.
+		if (oroRing) ClearRingBracket();
 
 	}
 
@@ -1304,6 +1519,27 @@ void vPlanet::RenderBaseDepth (const LPD3DXMATRIX pVP, int opt)
 	if (scn->GetRenderFlags() & 0x20) {
 		for (DWORD i = 0; i < nbase; i++) if (vbase[i]) vbase[i]->RenderStructureDepth(pVP, opt);
 	}
+}
+
+// ORO patch (ah) step 2: the base structures' contribution to the spot map's caster fit -
+// the same guards as RenderBaseDepth (proxy body, render flag 0x20), so a base the user
+// switched off neither casts nor widens the map.
+int vPlanet::AimBaseLocalShadowCasters(const D3DXVECTOR3& P, float range, D3DXVECTOR3& sum, float& weight)	// ORO patch (ah) step 5
+{
+	if (hObj != oapiCameraProxyGbody()) return 0;
+	if (!(scn->GetRenderFlags() & 0x20)) return 0;
+	int n = 0;
+	for (DWORD i = 0; i < nbase; i++) if (vbase[i]) n += vbase[i]->AimLocalShadowCasters(P, range, sum, weight);
+	return n;
+}
+
+int vPlanet::FitBaseLocalShadowCasters(const D3DXVECTOR3& P, const D3DXVECTOR3& D, float range, float halfCone, float& halfFit, float& farFit)
+{
+	if (hObj != oapiCameraProxyGbody()) return 0;
+	if (!(scn->GetRenderFlags() & 0x20)) return 0;
+	int n = 0;
+	for (DWORD i = 0; i < nbase; i++) if (vbase[i]) n += vbase[i]->FitLocalShadowCasters(P, D, range, halfCone, halfFit, farFit);
+	return n;
 }
 
 // ==============================================================

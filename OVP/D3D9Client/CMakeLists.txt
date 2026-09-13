@@ -58,6 +58,7 @@ set(SourceFiles
 	TileMgr.cpp
 	Tilemgr2.cpp
 	VBase.cpp
+	OroBaseAnim.cpp
 	VideoTab.cpp
 	VObject.cpp
 	VPlanet.cpp
@@ -109,6 +110,7 @@ set(IncludeFiles
 	TileMgr.h
 	Tilemgr2.h
 	VBase.h
+	OroBaseAnim.h
 	VectorHelpers.h
 	VideoTab.h
 	VObject.h

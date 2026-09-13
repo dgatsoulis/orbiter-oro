@@ -71,13 +71,18 @@ public:
 	int ShadowFilter;				///< Shadow Mapping Filter
 	int ShadowMapSize;				///< Shadow Map size
 	int TerrainShadowing;			///< Terrain Shadowing mode (0=None, 1=Stencil, 2=Projected, 3=Cascaded (ORO patch ae), default=1)
-	int LocalLightShadows;			///< ORO patch (z3): shadow map for the strongest local SPOT light, terrain receiver (0=off/stock, 1=on, default=1)
+	int LocalLightShadows;			///< ORO patch (z3): shadow maps for local SPOT lights (0=off/stock, 1=on, default=1)
+	int LocalLightShadowPoint;		///< ORO patch (ah) step 5: POINT lights cast too - 0 off, 1 an aimed map (a pseudo-spot fitted to the casters), 2 a five-face cube where five cells are free (default 1)
+	int LocalLightShadowMaps;		///< ORO patch (ah) step 4: how many spot lights cast at once - 1, 2, 4 or 6 maps (default 4). Cascaded mode keeps them in the cascade atlas' spare row; the other modes get a small local atlas
 	double ShadowDepthTol;			///< ORO patch (ab): stencil ground-shadow soft depth test, base tolerance [m] (default 1)
 	double ShadowDepthTolK;			///< ORO patch (ab): ...plus this per metre of distance (default 0.001)
-	int ShadowDebug;				///< ORO patch (ab)/(ae) INSTRUMENT: 0 off; 1 colour the stencil sheets by the depth test's verdict; 2 by the signed depth difference; 3 dump the cascade atlas once; 4 = 3 + colour every receiver by the cascade slot it reads. All log once a second.
+	int ShadowDebug;				///< ORO patch (ab)/(ae) INSTRUMENT: 0 off; 1 colour the stencil sheets by the depth test's verdict; 2 by the signed depth difference; 3 dump the cascade atlas once; 4 = 3 + colour every receiver by the cascade slot it reads; 5 = 3 + black every receiver whose grazing slope exceeds ShadowCascadeSlope (half-dark past half of it). All log once a second.
+int LocalLightSelfShadow;		///< ORO patch (ah) step 2 DIAGNOSTIC (2026-09-08, his SSV test): 1 = the emitter's OWN vessel casts into its own shadow map too, spot or point (normally excluded - emitters are authored inside hulls). Hidden key, default 0. 2026-09-13: the containment rule in aimCasters/OroFitCasterSphere used to reject the owner right after this flag admitted it, so for a point light the flag did nothing at all; the owner's own sphere is exempt from that skip now.
 	int ShadowCascadeSize;			///< ORO patch (ae): one cascade's map size; the atlas is 3x2 of these (512..4096, default 2048; 4096 = 768 MB and 16384-wide texture caps)
 	double ShadowCascadeFar;		///< ORO patch (ae): the far cascade's reach in metres (1000..60000, default 30000)
 	int ShadowCascadeSoft;			///< ORO patch (ae): 1 = the coarse cascades take a three-texel tent (soft far shadows), 0 = bilinear everywhere (default 1)
+	double ShadowCascadeSlope;		///< ORO patch (ae) THE MOIRE FIX (2026-09-13): the receiver-plane slope clamp in the cascade taps, as the tangent of the grazing angle (1..32, default 16 = 86 deg). It was a literal 4 (76 deg): past that the slope correction stopped growing while the surface's depth-per-texel kept growing as tan, and every receiver at a lower sun shadowed ITSELF - the hatched moire on a hull, a wall or the ground. Hidden key.
+	double ShadowCascadeOffset;		///< ORO patch (ae) THE MOIRE FIX: the receiver's normal offset before the lookup, in texels x sin(grazing) (0..8, default 1.5; it was 0.5). Its depth margin is offset x tan - the same growth the acne has - so it beats the clamp error at any angle, and it only ever moves the LOOKUP sideways (<= offset texels), never the depth, so contact shadows stay put. Hidden key.
 	int ParticleLight;				///< ORO patch (x): DIFFUSE particle sun lighting (0=Off/stock always-lit, 1=Brightness only, 2=Brightness+colour, default=2)
 	double ParticleShadow;			///< ORO patch (x): DIFFUSE particle ground-shadow strength 0..1 (0=no shadow, 1=stock, default=1)
 	double ParticleTintLead;		///< ORO patch (x): dawn-hue lead in sin-elevation, 0..0.20 (the smoke reads the sun this much HIGHER than it is, default=0.10)

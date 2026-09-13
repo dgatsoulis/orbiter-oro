@@ -39,7 +39,9 @@ struct ENVCAMREC {
 	DWORD			flags;			///< Camera flags
 	WORD			nGrpRng;		///< ORO patch (v): number of group ranges below
 	WORD *			pGrpRng;		///< ORO patch (v): (first,last) mesh-group index
-									///  pairs that sample THIS probe (all meshes)
+									///  pairs that sample THIS probe
+	short *			pGrpMesh;		///< ORO patch (ah): per range, the MESH index it applies to, -1 = every mesh
+									///  (GROUPS = -1; MESHGROUPS m a b = m - DaveS's SSV, 100+ meshes, 2026-09-08)
 	bool			bBox;			///< ORO patch (v): box-projected sampling on
 	D3DXVECTOR3		bxC;			///< ... proxy box centre, vessel-local [m]
 	D3DXVECTOR3		bxE;			///< ... proxy box half-extents, vessel-local [m]
@@ -65,6 +67,7 @@ struct ENVPLNREC {
 	int				refGrp;			///< ... and the group whose transform carries the plane
 	WORD			nGrpRng;		///< group ranges that sample this plane
 	WORD *			pGrpRng;		///< (first,last) pairs, as the camera ranges
+	short *			pGrpMesh;		///< ORO patch (ah): per range, the mesh index (-1 = every mesh)
 	float			rDist;			///< assumed reflected-geometry distance [m] for the
 									///  CURVATURE warp (RDIST; only matters off-plane)
 };

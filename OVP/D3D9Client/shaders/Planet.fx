@@ -61,8 +61,27 @@ TileVS PlanetTechVS(TILEVERTEX vrt)
 
 float4 PlanetTechPS(TileVS frg) : COLOR
 {
+	// ORO patch (aj) 2026-09-12: THE RING'S SHADOW ON THE PLANET - absent from stock
+	// entirely. Position from the normal (exact: surfmgr v1 is a sphere), march toward
+	// the sun (-gSun.Dir - Dir is the direction light TRAVELS), intersect the ring
+	// plane, read the profile's optical depth at that radius, attenuate the SUN term
+	// only - never ambient, and only ever darkens (a shadow must not create light).
+	// Carries the ring's own structure, so the Cassini Division is a bright line inside
+	// the band; the obliquity does the seasons (broad at solstice, a knife-edge at
+	// equinox) with no special case. No branch around tex2D: sample, then gate.
+	float3 P   = normalize(frg.normalW) * gRadius[0];
+	float3 S   = -gSun.Dir;
+	float  dn  = dot(S, gRingShd.xyz);
+	float  adn = max(abs(dn), 1e-4);
+	float  t   = -dot(P, gRingShd.xyz) / (dn >= 0.0 ? adn : -adn);
+	float  R   = length(P + t * S);
+	float  u   = saturate((R - gRingRad.x) * gRingRad.z);
+	float  a   = tex2D(RingProfS, float2(u, 0.5)).a;
+	float  tau = 5.0 * a * a * gRingPrm.y;
+	float  hit = step(0.0, t) * step(gRingRad.x, R) * step(R, gRingRad.y);   // toward the sun, inside the annulus
+	float  ringShd = lerp(1.0, exp(-tau * hit / max(adn, 0.02)), gRingPrm.x);
 
-	float4 diff  = frg.aux.g*(gMat.diffuse*frg.diffuse) + (gMat.ambient*frg.aux.b);
+	float4 diff  = frg.aux.g*(gMat.diffuse*frg.diffuse*ringShd) + (gMat.ambient*frg.aux.b);
 	float4 vSpe = frg.aux.r * (gWater.specular*frg.diffuse);
 	float4 vEff = tex2D(Planet1S, frg.tex0);
 

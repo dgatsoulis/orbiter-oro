@@ -28,6 +28,18 @@ using namespace oapi;
 
 
 MeshShader* D3D9Mesh::s_pShader[16] = {};
+bool D3D9Mesh::bRingNearField = false;   // ORO patch (aj) round 2, see Mesh.h
+
+// ORO patch (aj) round 2: the ring techniques declare ZEnable=false / ZWriteEnable=true
+// (the painter's split against the planet). The near-field draw runs AFTER the hulls
+// on the vessel frustum and needs the opposite - test on, write off - and D3DX applies
+// a technique's state block at BeginPass, so the override goes after it.
+static inline void OroRingNearFieldStates(LPDIRECT3DDEVICE9 pDev)
+{
+	if (!D3D9Mesh::bRingNearField) return;
+	pDev->SetRenderState(D3DRS_ZENABLE, TRUE);
+	pDev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+}
 MeshShader::VSConst MeshShader::vs_const = {};
 MeshShader::PSConst MeshShader::ps_const = {};
 MeshShader::PSBools MeshShader::ps_bools = {};
@@ -487,6 +499,14 @@ void RainFlashClear()
 
 void D3D9Mesh::Null(const char *meshName /* = NULL */)
 {
+	// ORO patch (aj) part 5: sunLight is pushed straight to the GPU by every Render* path
+	// but is written ONLY by SetSunLight - no constructor touched it, so a mesh nobody
+	// lights (the ring meshes, RingMgr::CreateRing) pushed an indeterminate heap block as
+	// the sun. Zeroing here does not make such a mesh correct - RingMgr now gives the ring
+	// the scene's sun, which does - but it makes the failure DETERMINISTIC rather than
+	// dependent on what the allocator handed back. Nothing that calls SetSunLight before
+	// drawing is affected.
+	memset(&sunLight, 0, sizeof(sunLight));
 	nGrp = 0;
 	Grp = NULL;
 	nTex = 0;
@@ -1818,11 +1838,42 @@ void D3D9Mesh::ConfigureAtmo()
 // ================================================================================================
 // This is a rendering routine for a Exterior Mesh, non-spherical moons/asteroids
 //
+// ============================================================================================
+// ORO 2026-09-10 (triage A7, Buck Rogers: "getting rain on the HUD"): THE VC HUD COMBINER
+// GOES LAST. Patch (t)'s rule ("the chrome goes last") applied to ONE MESH GROUP.
+//
+// The combiner is a group of the VC mesh, drawn additive with the core's HUD surface as
+// its texture, inside the cockpit render - which puts its symbology into the colour frame
+// BEFORE the addon's HUD_2ND stage resamples that frame. Every full-frame effect then
+// works on it: the windscreen drops bent the numbers and lines along with the world
+// outside, although the combiner sits INSIDE the cabin where no drop can reach it.
+// Masking its pixels out of the drop layer cannot fix that (a drop BESIDE a glyph still
+// lenses the glyph's pixels into itself; flown, seen, reverted the same evening) - only
+// draw order can. So while gcCore::SetDeferVCHUD is armed the cockpit render SKIPS the
+// HUD group and records the mesh + world matrix; the addon then asks for it to be drawn
+// at the point in its own stack where it belongs (after the world effects, before the
+// physiological ones, so a blackout still takes the HUD with it), and Scene draws it
+// UNCONDITIONALLY at the end of the HUD_2ND stage if nobody asked - a frame in which the
+// addon's callback did not run must still show its HUD. Unarmed, nothing changes.
+// ⚠️ TWO RENDER PATHS carry the HUD branch - Render() and RenderFast() - and the check
+// sits in both (the list-is-a-claim rule: grep the PATHS, not the files).
+// ⚠️ THE RECORD IS PER FRAME: RenderMainScene clears it at its top and the end-of-stage
+// flush consumes it, so a mesh pointer never survives into a frame it might not exist in.
+// ⚠️ The replay runs under the cockpit's own bracket (dry, clear air - Scene.cpp's
+// OroFlushVCHUD), or the HUD quad would pick up the exterior's wet-hull glint.
+// ============================================================================================
+bool        g_oroDeferVCHUD  = false;   // armed by gcCore::SetDeferVCHUD (the addon, on change)
+bool        g_oroReplayVCHUD = false;   // true only inside OroFlushVCHUD: draw the HUD group ONLY
+bool        g_oroHudPending  = false;   // a group was skipped this frame and awaits its draw
+D3D9Mesh*   g_oroHudMesh     = NULL;
+D3DXMATRIX  g_oroHudW;
+int         g_oroHudTech     = 0;
+
 void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *pEnv, int nEnv)
 {
 
 	_TRACE;
-	
+
 	if (!IsOK()) return;
 
 	pBuf->Map(pDev);
@@ -1952,12 +2003,9 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
 
 	int nMeshLights = 0;
 
-	// ORO patch (z3) round 2b: each mesh picks its own strongest lights, so the frame's
-	// shadow-mapped scene light lands in a DIFFERENT slot per mesh (or in none) - match
-	// by scene index here, where both are known. Same shape as the terrain's per-tile
-	// match in Surfmgr2. Set for EVERY mesh, or one mesh inherits its predecessor's.
-	const Scene::LOCALSHADOWPARAM* lsp = gc->GetScene()->GetLocalShadowData();
-	float lclSlot = -1.0f;
+	// ORO patch (ah) step 4: a light's spot shadow map rides its OWN struct (Diffuse.a = cell + 1,
+	// assigned by Scene::RenderLocalLightShadowMap), so the LightStruct copy below carries it and
+	// the mesh needs no per-slot match; the maps' frames are pushed once per frame by the scene.
 
 	if (pLights && nSceneLights>0) {
 
@@ -1986,7 +2034,6 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
 			// Create a list of N most effective lights ---------------------------------------------
 			for (int i = 0; i < nMeshLights; i++) {
 				memcpy(&Locals[i], &pLights[LightList[i].idx], sizeof(LightStruct));
-				if (LightList[i].idx == lsp->idx) lclSlot = (float)i;	// ORO patch (z3) 2b
 
 				// Override application configuration to prevent oversaturation of lights at point plank range.
 				if (scn->GetRenderPass() == RENDERPASS_MAINSCENE)
@@ -1997,18 +2044,6 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
 
 	FX->SetValue(eLights, Locals, sizeof(LightStruct) * Config->MaxLights());
 
-	// ORO patch (z3) round 2b: hand the mesh the local-light shadow map
-	{
-		D3DXVECTOR4 lv(lclSlot, 0.0f, 0.0f, 0.0f);
-		if (lclSlot >= 0.0f) {
-			lv.y = 1.0f / (float)lsp->size;
-			lv.z = lsp->texel;		// the normal-offset + footprint-bias scale
-			lv.w = lsp->kdepth;		// metres-along-ray -> 1-z/w units
-			FX->SetMatrix(eLclShdVP, &lsp->mViewProj);
-			FX->SetTexture(eLclShmTex, lsp->pShadowMap);
-		}
-		FX->SetVector(eLclShd, &lv);
-	}
 
 
 	if (nEnv >= 1 && pEnv[0]) FX->SetTexture(eEnvMapA, pEnv[0]);
@@ -2049,6 +2084,14 @@ void D3D9Mesh::Render(const LPD3DXMATRIX pW, int iTech, LPDIRECT3DCUBETEXTURE9 *
 		}
 
 		bool bHUD = (Grp[g].MFDScreenId == 0x100);
+
+		// ORO A7: the deferred HUD - replay draws the HUD group and nothing else; an armed
+		// cockpit pass records it and draws nothing (see the note above Render()).
+		if (g_oroReplayVCHUD) { if (!bHUD) continue; }
+		else if (bHUD && g_oroDeferVCHUD && iTech == RENDER_VC) {
+			g_oroHudMesh = this; g_oroHudW = *pW; g_oroHudTech = iTech; g_oroHudPending = true;
+			continue;
+		}
 
 		// Inline engine renders HUD/MFDs in a separate rendering pass and flag 0x2 is used to disable rendering during the main rendering pass
 		if ((Grp[g].UsrFlag & 0x2) && (!bHUD)) continue;
@@ -2477,8 +2520,9 @@ void D3D9Mesh::RenderSimplified(const LPD3DXMATRIX pW, LPDIRECT3DCUBETEXTURE9 *p
 	//D3D9DebugLog("Mesh=[%s], nLights=%d", GetName(), nSceneLights);
 
 	// ORO patch (z3) round 2b: the per-mesh slot match, as in Render()
-	const Scene::LOCALSHADOWPARAM* lsp = gc->GetScene()->GetLocalShadowData();
-	float lclSlot = -1.0f;
+	// ORO patch (ah) step 4: a light's spot shadow map rides its OWN struct (Diffuse.a = cell + 1,
+	// assigned by Scene::RenderLocalLightShadowMap), so the LightStruct copy below carries it and
+	// the mesh needs no per-slot match; the maps' frames are pushed once per frame by the scene.
 
 	if (pLights && nSceneLights>0) {
 
@@ -2508,25 +2552,12 @@ void D3D9Mesh::RenderSimplified(const LPD3DXMATRIX pW, LPDIRECT3DCUBETEXTURE9 *p
 			// Create a list of N most effective lights ---------------------------------------------
 			for (int i = 0; i < nMeshLights; i++) {
 				memcpy(&Locals[i], &pLights[LightList[i].idx], sizeof(LightStruct));
-				if (LightList[i].idx == lsp->idx) lclSlot = (float)i;	// ORO patch (z3) 2b
 			}
 		}
 	}
 
 	FX->SetValue(eLights, Locals, sizeof(LightStruct) * Config->MaxLights());
 
-	// ORO patch (z3) round 2b: hand the mesh the local-light shadow map
-	{
-		D3DXVECTOR4 lv(lclSlot, 0.0f, 0.0f, 0.0f);
-		if (lclSlot >= 0.0f) {
-			lv.y = 1.0f / (float)lsp->size;
-			lv.z = lsp->texel;		// the normal-offset + footprint-bias scale
-			lv.w = lsp->kdepth;		// metres-along-ray -> 1-z/w units
-			FX->SetMatrix(eLclShdVP, &lsp->mViewProj);
-			FX->SetTexture(eLclShmTex, lsp->pShadowMap);
-		}
-		FX->SetVector(eLclShd, &lv);
-	}
 
 	if (nEnv >= 1 && pEnv[0]) FX->SetTexture(eEnvMapA, pEnv[0]);
 	int curEnvCam = 0;   // ORO patch (v): as in Render() - the simplified path too
@@ -2819,8 +2850,9 @@ void D3D9Mesh::RenderFast(const LPD3DXMATRIX pW, int iTech)
 	//D3D9DebugLog("Mesh=[%s], nLights=%d", GetName(), nSceneLights);
 
 	// ORO patch (z3) round 2b: the per-mesh slot match, as in Render()
-	const Scene::LOCALSHADOWPARAM* lsp = gc->GetScene()->GetLocalShadowData();
-	float lclSlot = -1.0f;
+	// ORO patch (ah) step 4: a light's spot shadow map rides its OWN struct (Diffuse.a = cell + 1,
+	// assigned by Scene::RenderLocalLightShadowMap), so the LightStruct copy below carries it and
+	// the mesh needs no per-slot match; the maps' frames are pushed once per frame by the scene.
 
 	if (pLights && nSceneLights>0) {
 
@@ -2851,25 +2883,12 @@ void D3D9Mesh::RenderFast(const LPD3DXMATRIX pW, int iTech)
 			int i;
 			for (i = 0; i < nMeshLights; i++) {
 				memcpy(&Locals[i], &pLights[LightList[i].idx], sizeof(LightStruct));
-				if (LightList[i].idx == lsp->idx) lclSlot = (float)i;	// ORO patch (z3) 2b
 			}
 		}
 	}
 
 	FX->SetValue(eLights, Locals, sizeof(LightStruct) * Config->MaxLights());
 
-	// ORO patch (z3) round 2b: hand the mesh the local-light shadow map
-	{
-		D3DXVECTOR4 lv(lclSlot, 0.0f, 0.0f, 0.0f);
-		if (lclSlot >= 0.0f) {
-			lv.y = 1.0f / (float)lsp->size;
-			lv.z = lsp->texel;		// the normal-offset + footprint-bias scale
-			lv.w = lsp->kdepth;		// metres-along-ray -> 1-z/w units
-			FX->SetMatrix(eLclShdVP, &lsp->mViewProj);
-			FX->SetTexture(eLclShmTex, lsp->pShadowMap);
-		}
-		FX->SetVector(eLclShd, &lv);
-	}
 
 	UINT numPasses = 0;
 	HR(FX->Begin(&numPasses, D3DXFX_DONOTSAVESTATE));
@@ -2888,6 +2907,14 @@ void D3D9Mesh::RenderFast(const LPD3DXMATRIX pW, int iTech)
 		if ((Grp[g].UsrFlag & 0x2) && (Grp[g].MFDScreenId != 0x100)) continue;
 
 		bool bHUD = Grp[g].MFDScreenId == 0x100;
+
+		// ORO A7: the deferred HUD, the RenderFast copy of the check in Render() - both
+		// paths carry the HUD branch, so both carry this (see the note above Render()).
+		if (g_oroReplayVCHUD) { if (!bHUD) continue; }
+		else if (bHUD && g_oroDeferVCHUD && iTech == RENDER_VC) {
+			g_oroHudMesh = this; g_oroHudW = *pW; g_oroHudTech = iTech; g_oroHudPending = true;
+			continue;
+		}
 
 		// Mesh Debugger -------------------------------------------------------------------------------------------
 		//
@@ -3112,6 +3139,55 @@ bool D3D9Mesh::SetTransform(int g, const LPD3DXMATRIX pMat)
 }
 
 
+
+
+// ===========================================================================================
+// ORO 2026-09-10: THE WET-GROUND LOOK OVER A BELOW-SHADOW BASE STRUCTURE - a runway, a pad,
+// a taxiway. Those meshes render through the VESSEL path (RENDER_BASEBS) and so never had
+// the base tile's pools, sky film or mirrored vessel; this draws Mesh.fx's WetOverlayTech
+// over them, straight after their own draw and inside vBase::RenderSurface's depth-bias
+// bracket, so it z-tests exactly as the surface itself does. Modelled on RenderBaseTile:
+// same declaration, stream and haze setup; no per-group texture (the overlay samples only
+// the mirror). Two passes - darkening (modulate), then film + reflection (alpha). See the
+// note above the technique for the maths and what is deliberately not carried.
+//
+void D3D9Mesh::RenderWetOverlay(const LPD3DXMATRIX pW)
+{
+	if (!IsOK() || !eWetOverlay) return;
+
+	Scene *scn = gc->GetScene();
+
+	D3DXMATRIX mWorldView;
+	D3DXMatrixMultiply(&mWorldView, pW, scn->GetViewMatrix());
+	D3DXVECTOR4 Field = D9LinearFieldOfView(scn->GetProjectionMatrix());
+
+	pDev->SetVertexDeclaration(pMeshVertexDecl);
+	pDev->SetStreamSource(0, pBuf->pVB, 0, sizeof(NMVERTEX));
+	pDev->SetIndices(pBuf->pIB);
+
+	FX->SetTechnique(eWetOverlay);
+	{
+		extern float g_gcSurfaceWet;
+		if (eSurfWet) FX->SetFloat(eSurfWet, g_gcSurfaceWet);
+	}
+	FX->SetMatrix(eW, pW);
+
+	ConfigureAtmo();
+
+	UINT numPasses = 0;
+	HR(FX->Begin(&numPasses, D3DXFX_DONOTSAVESTATE));
+
+	for (DWORD pass = 0; pass < numPasses; pass++) {
+		HR(FX->BeginPass(pass));
+		for (DWORD g = 0; g < nGrp; g++) {
+			if (Grp[g].UsrFlag & 0x2) continue;
+			if (!D9IsBSVisible(&Grp[g].BBox, &mWorldView, &Field)) continue;
+			pDev->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, Grp[g].VertOff, 0, Grp[g].nVert, Grp[g].IdexOff, Grp[g].nFace);
+		}
+		HR(FX->EndPass());
+	}
+	HR(FX->End());
+}
 
 
 // ===========================================================================================
@@ -3968,6 +4044,7 @@ void D3D9Mesh::RenderRings(const LPD3DXMATRIX pW, LPDIRECT3DTEXTURE9 pTex)
 	HR(FX->SetValue(eMtrl, &defmat, sizeof(D3D9MatExt)-4));
 	HR(FX->Begin(&numPasses, D3DXFX_DONOTSAVESTATE));
 	HR(FX->BeginPass(0));
+	OroRingNearFieldStates(pDev);
 	RenderGroup(0);
 	HR(FX->EndPass());
 	HR(FX->End());
@@ -3993,11 +4070,37 @@ void D3D9Mesh::RenderRings2(const LPD3DXMATRIX pW, LPDIRECT3DTEXTURE9 pTex, floa
 	HR(FX->SetVector(eTexOff, ptr(D3DXVECTOR4(irad, orad, 0, 0))));
 	HR(FX->Begin(&numPasses, D3DXFX_DONOTSAVESTATE));
 	HR(FX->BeginPass(0));
+	OroRingNearFieldStates(pDev);
 	RenderGroup(0);
 	HR(FX->EndPass());
 	HR(FX->End());
 }
 
+
+// ORO patch (aj): the ORO ring. gRingPrm/gRingRad/gRingShd/gRingProf are set once per
+// ringed planet by vPlanet::Render's bracket (they serve the planet's shadow pass too),
+// so this only chooses the technique and draws the carrier mesh. --------------------
+//
+void D3D9Mesh::RenderRingsORO(const LPD3DXMATRIX pW)
+{
+	_TRACE;
+	if (!IsOK()) return;
+
+	D3D9Stats.Mesh.Vertices += Grp[0].nVert;
+	D3D9Stats.Mesh.MeshGrps++;
+
+	UINT numPasses = 0;
+	HR(FX->SetTechnique(eRingTechORO));
+	HR(FX->SetMatrix(eW, pW));
+	FX->SetValue(eSun, &sunLight, sizeof(D3D9Sun));
+	HR(FX->SetValue(eMtrl, &defmat, sizeof(D3D9MatExt)-4));
+	HR(FX->Begin(&numPasses, D3DXFX_DONOTSAVESTATE));
+	HR(FX->BeginPass(0));
+	OroRingNearFieldStates(pDev);
+	RenderGroup(0);
+	HR(FX->EndPass());
+	HR(FX->End());
+}
 
 // ===========================================================================================
 //

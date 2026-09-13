@@ -113,7 +113,8 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
 	if (gSurfWet > 0.001f) {
 		cSpec.rgb = lerp(cSpec.rgb, cSpec.rgb + 0.55f, gSurfWet * 0.8f);
 		cSpec.a   = lerp(cSpec.a, max(cSpec.a, 1.0f) * 7.0f, gSurfWet * 0.75f);
-		cTex.rgb *= lerp(1.0f, 0.66f, gSurfWet);
+		// ORO 2026-09-11: base ground takes the terrain's darkening - see gBaseGround.
+		cTex.rgb *= lerp(1.0f, lerp(0.66f, 1.0f - 0.494f * gWetDark, gBaseGround), gSurfWet);
 	}
 
 	// Approximate roughness
@@ -167,7 +168,7 @@ float4 AdvancedPS(float4 sc : VPOS, PBRData frg) : COLOR
 	cTex.rgb *= saturate(Base + gMtrl.diffuse.rgb * Light_fx(cDiffLocal + cSun * dLN));
 	cTex.rgb += cAlbedo * max(gMtrl.emissive.rgb - 1.0f, 0.0f);
 	// ORO patch (s): the drop glint - SKY light, after the bake (see PBR_PS note)
-	cTex.rgb += WetSparkle(frg.tex0.xy, nrmW, length(frg.camW))
+	cTex.rgb += WetSparkle(frg.tex0.xy, nrmW, frg.camW)
 	          * gSun.Ambient * (1.0f + gStorm * 1.8f) * 6.5f;
 
 	// Lit the specular surface

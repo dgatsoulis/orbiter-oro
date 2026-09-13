@@ -26,6 +26,8 @@ class TaxiLights;
  * on the surface of a planet or moon, usually with runways or landing pads
  * where vessels can land and take off.
  */
+class OroBaseAnim;   // ORO patch (ag): the animated base objects (trains, solar plant) - OroBaseAnim.h
+
 class vBase: public vObject {
 	friend class vPlanet;
 
@@ -56,7 +58,9 @@ public:
 	void RenderRunwayLights (LPDIRECT3DDEVICE9 dev);
 	bool RenderSurface (LPDIRECT3DDEVICE9 dev);
 	bool RenderStructures (LPDIRECT3DDEVICE9 dev);
-	bool RenderStructureDepth (const LPD3DXMATRIX pVP, int opt = 1);   // ORO patch (z2): opt 1 = GBUF_DEPTH; (z3): opt 0 = a light's shadow map
+	bool RenderStructureDepth (const LPD3DXMATRIX pVP, int opt = 1);   // ORO patch (z2): opt 1 = GBUF_DEPTH; (z3): opt 0 = a light's shadow map
+	int  FitLocalShadowCasters(const D3DXVECTOR3& P, const D3DXVECTOR3& D, float range, float halfCone, float& halfFit, float& farFit);	// ORO patch (ah) step 2
+	int  AimLocalShadowCasters(const D3DXVECTOR3& P, float range, D3DXVECTOR3& sum, float& weight);	// ORO patch (ah) step 5: where the visible casters are, seen from a POINT light
 	void RenderGroundShadow (LPDIRECT3DDEVICE9 dev, float alpha);
 
 	const SurftileSpec *GetTileDesc() const { return tspec; }
@@ -85,6 +89,7 @@ private:
 	D3D9Mesh **structure_bs;
 	D3D9Mesh **structure_as;
 	DWORD nstructure_bs, nstructure_as;
+	OroBaseAnim *oroAnim;      // ORO patch (ag): the moving base objects; its meshes live in structure_as
 	bool lights;               // use nighttextures for base objects
 	//bool bLocalLight;          // true if lighting is modified
 	class vPlanet *vP;

@@ -248,6 +248,7 @@ HRESULT CD3DFramework9::Initialize(HWND _hWnd, GraphicsClient::VIDEODATA *vData)
 	LogAlw("MaxTextureBlendStages... : %u",caps.MaxTextureBlendStages);
 	LogOapi("MaxTextureWidth......... : %u",caps.MaxTextureWidth);
 	LogOapi("MaxTextureHeight........ : %u",caps.MaxTextureHeight);
+	LogOapi("MaxPS30InstrSlots....... : %u",caps.MaxPixelShader30InstructionSlots);	// ORO patch (ah) step 4: the shader-size cap tools/fxeff checks against (4096 on NVIDIA) - so a tester's log names their card's
 	LogOapi("MaxTextureRepeat........ : %u",caps.MaxTextureRepeat);
 	LogOapi("VolTexAddressCaps....... : 0x%X",caps.VolumeTextureAddressCaps);
 	LogAlw("MaxVolumeExtent......... : %u",caps.MaxVolumeExtent);

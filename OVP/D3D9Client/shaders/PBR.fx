@@ -310,7 +310,9 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 	if (gSurfWet > 0.001f) {
 		cSpec.rgb = lerp(cSpec.rgb, cSpec.rgb + 0.55f, gSurfWet * 0.8f);
 		cSpec.a   = lerp(cSpec.a, max(cSpec.a, 1.0f) * 7.0f, gSurfWet * 0.75f);
-		cDiff.rgb *= lerp(1.0f, 0.66f, gSurfWet);
+		// ORO 2026-09-11: base GROUND (runway/pad/taxiway) takes the terrain's darkening, not
+		// a hull's - see gBaseGround in D3D9Client.fx. 0 on every vessel, so hulls are exact.
+		cDiff.rgb *= lerp(1.0f, lerp(0.66f, 1.0f - 0.494f * gWetDark, gBaseGround), gSurfWet);
 
 		// THE SPARKLE: the shared drop-glint helper (see WetSparkle in D3D9Client.fx -
 		// one implementation for every shader path, distance-aware, splash cadence).
@@ -319,7 +321,7 @@ float4 PBR_PS(float4 sc : VPOS, PBRData frg) : COLOR
 		// through the SUN's specular lobe - the very term the storm light deliberately
 		// collapses. A sparkle hung on the sun cannot exist in the weather that makes
 		// things wet; it is applied after the light bake, scaled by the SKY ambient.
-		wetSprk = WetSparkle(frg.tex0.xy, nrmW, length(frg.camW));
+		wetSprk = WetSparkle(frg.tex0.xy, nrmW, frg.camW);
 	}
 
 	// Compute a specular lobe for base material
@@ -565,7 +567,9 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
 		// stayed bone dry. (r)'s rule, swept properly this time.
 		if (gSurfWet > 0.001f) {
 			cSpec.rgb = lerp(cSpec.rgb, cSpec.rgb + 0.55f, gSurfWet * 0.8f);
-			cDiff.rgb *= lerp(1.0f, 0.66f, gSurfWet);
+			// ORO 2026-09-11: base GROUND (runway/pad/taxiway) takes the terrain's darkening, not
+		// a hull's - see gBaseGround in D3D9Client.fx. 0 on every vessel, so hulls are exact.
+		cDiff.rgb *= lerp(1.0f, lerp(0.66f, 1.0f - 0.494f * gWetDark, gBaseGround), gSurfWet);
 		}
 
 		//cSpec.rgb *= 0.33333f;
@@ -579,12 +583,22 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
 		// ORO patch (p) FIX (2026-09-06): declared OUTSIDE the block. With Vessel mapping
 		// None the client compiles SHDMAP as 0, the block vanishes, and the two reads of
 		// fShadow below were X3004 - the whole effect refused since patch (p) landed.
-		// (FAST carries no cascade term: it sits at the ps_3_0 temp ceiling.)
 		float fShadow = 1.0f;
 #if SHDMAP > 0
 		fShadow = smoothstep(0, 0.72, ComputeShadow(frg.shdH, dLN, sc));
-		dLN *= fShadow;
 #endif
+#if defined(_CASCADE)
+		// ORO patch (ae) round 12 (2026-09-06): THE WORLD'S SHADOWS ON THE FAST PATH. This
+		// is the path every mesh with no advanced texture maps takes (Mesh.cpp RenderFast):
+		// every base structure, every runway and pad surface, and the stock DeltaGlider
+		// itself - so until now a hull parked in a hangar and the hangar's own walls stayed
+		// sunlit in mode 3 while the terrain around them went dark. Same term as PBR_PS,
+		// min'd into the self-shadow so Vessel mapping None still receives the world.
+		// Placed HERE on purpose: few temporaries are live yet (the (w) shine shadow
+		// overflowed this shader further down, X4505).
+		fShadow = min(fShadow, OroCascadeShadow(-frg.camW, nrmW, -gSun.Dir));
+#endif
+		dLN *= fShadow;   // 1.0 when neither map applies - the SHDMAP-only build is bit-identical
 
 		// ----------------------------------------------------------------------
 		// Compute Local Light Sources
@@ -614,9 +628,7 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
 		// wet water film = smoother surface = tighter lobe (ORO patch s)
 		float  fSun = pow(saturate(dot(HlfW, nrmW)), gMtrl.specular.a * (1.0f + 5.0f * gSurfWet));
 
-#if SHDMAP > 0
-		fSun *= fShadow;
-#endif
+		fSun *= fShadow;   // ORO patch (ae) round 12: the self-shadow AND the cascade (1.0 when neither applies)
 
 
 		if (dLN == 0) fSun = 0;
@@ -628,7 +640,7 @@ float4 FAST_PS(float4 sc : VPOS, FASTData frg) : COLOR
 #endif
 		cDiff.rgb += (cSpec.rgb * specLight);
 		// ORO patch (s): the drop glint - SKY light, after the bake (see PBR_PS note)
-		cDiff.rgb += WetSparkle(frg.tex0.xy, nrmW, length(frg.camW))
+		cDiff.rgb += WetSparkle(frg.tex0.xy, nrmW, frg.camW)
 		           * gSun.Ambient * (1.0f + gStorm * 1.8f) * 6.5f;
 
 		cDiff.rgb += cEmis;

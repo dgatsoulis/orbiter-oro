@@ -329,6 +329,7 @@ public:
 	void			RenderGroup(const GROUPREC *grp);
 	void			RenderGroup(int idx);
 	void			RenderBaseTile(const LPD3DXMATRIX pW);
+	void			RenderWetOverlay(const LPD3DXMATRIX pW);	// ORO 2026-09-10: the tile's wet look over a runway/pad/taxiway mesh (Mesh.fx WetOverlayTech)
 	void			RenderBoundingBox(const LPD3DXMATRIX pW);
 	void			Render(const LPD3DXMATRIX pW, int iTech=RENDER_VESSEL, LPDIRECT3DCUBETEXTURE9 *pEnv=NULL, int nEnv=0);
 	void			RenderFast(const LPD3DXMATRIX pW, int iTech);
@@ -337,6 +338,8 @@ public:
 	void			RenderShadowsEx(float alpha, const LPD3DXMATRIX pP, const LPD3DXMATRIX pW, const D3DXVECTOR4 *light, const D3DXVECTOR4 *param);
 	void			RenderRings(const LPD3DXMATRIX pW, LPDIRECT3DTEXTURE9 pTex);
 	void			RenderRings2(const LPD3DXMATRIX pW, LPDIRECT3DTEXTURE9 pTex, float irad, float orad);
+	void			RenderRingsORO(const LPD3DXMATRIX pW);   // ORO patch (aj): the ring uniforms are already set by vPlanet's bracket
+	static bool		bRingNearField;   // ORO patch (aj) round 2: raised by vPlanet::RenderRingsNearField around its two draws - the three ring draws then override the technique's depth states (test ON, write OFF), because the sheet is drawn AFTER the hulls there
 	void			RenderAxisVector(LPD3DXMATRIX pW, const D3DXCOLOR *pColor, float len);
 	void			RenderSimplified(const LPD3DXMATRIX pW, LPDIRECT3DCUBETEXTURE9 *pEnv = NULL, int nEnv = 0, bool bSP = false);
 	void			CheckMeshStatus();

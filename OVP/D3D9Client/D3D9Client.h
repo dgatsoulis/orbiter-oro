@@ -37,7 +37,7 @@
 #define PP_LENSFLARE		0x2
 
 #define MAX_SCENE_LIGHTS	(DWORD)24
-#define MAX_MESH_LIGHTS		8	// Must match the setting in D3D9Client.fx
+#define MAX_MESH_LIGHTS		16	// unused since ORO patch (ah): the per-mesh cap is Config->MaxLights() (1/4/8/12/16), the shader's MAX_LIGHTS macro follows it
 
 #ifdef _NVAPI_H
 extern StereoHandle	pStereoHandle;

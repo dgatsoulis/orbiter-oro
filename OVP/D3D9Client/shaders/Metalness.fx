@@ -369,7 +369,8 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 	[branch] if (gSnow.x > 0.0f)
 		cDiff.rgb = lerp(cDiff.rgb, ORO_SNOW_ALBEDO, OroSnowMask(nrmW, gFogCam.xyz, 1e9f, frg.tex0.xy * 24.0f));
 	// ORO patch (s): wet albedo damp, same 0.66 as every other path
-	if (gSurfWet > 0.001f) cDiff.rgb *= lerp(1.0f, 0.66f, gSurfWet);
+	// ORO 2026-09-11: base ground takes the terrain's darkening - see gBaseGround.
+	if (gSurfWet > 0.001f) cDiff.rgb *= lerp(1.0f, lerp(0.66f, 1.0f - 0.494f * gWetDark, gBaseGround), gSurfWet);
 
 	float3 zD = cDiff.rgb * fA * LightFXSq(Sq(cSun * fR * dLN) + cDiffLocal + Sq(cAmbient * fAmbShd) + Sq(gMtrl.emissive.rgb));
 
@@ -379,7 +380,7 @@ float4 MetalnessPS(float4 sc : VPOS, PBRData frg) : COLOR
 	
 	cDiff.rgb = zD + zS + cE;
 	// ORO patch (s): the drop glint - SKY light, shared helper (see D3D9Client.fx)
-	cDiff.rgb += WetSparkle(frg.tex0.xy, nrmW, length(frg.camW))
+	cDiff.rgb += WetSparkle(frg.tex0.xy, nrmW, frg.camW)
 	           * gSun.Ambient * (1.0f + gStorm * 1.8f) * 6.5f;
 
 	// Override material alpha to make reflections visible

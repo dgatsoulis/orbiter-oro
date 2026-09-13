@@ -47,6 +47,7 @@ public:
 	inline double OuterRad() const { return orad; }
 
 	bool Render (LPDIRECT3DDEVICE9 dev, D3DXMATRIX &mWorld, bool zenable);
+	bool RenderNearField (LPDIRECT3DDEVICE9 dev, const D3DXMATRIX &W);   // ORO patch (aj) round 2: the ORO ring on a LOCAL unit disc placed by W (camera-relative, small coordinates - see VPlanet::RenderRingsNearField); false when no ORO look is pushed
 
 protected:
 	D3D9Mesh *CreateRing (double irad, double orad, int nsect);
@@ -56,6 +57,8 @@ private:
 	static oapi::D3D9Client *gc;
 	const vPlanet *vp;
 	D3D9Mesh *mesh[MAXRINGRES];
+	D3D9Mesh *meshORO[MAXRINGRES];  // ORO patch (aj): the same disc at 64/128/256 sections - stock keeps its 8/12/16 (a 16-gon inner edge, 1,430 km short at each chord), so the stock look is untouched
+	D3D9Mesh *meshNear;             // ORO patch (aj) round 2: a UNIT half-disc for the near-field draw (CreateRing(0, 1, 64) - the inner edge collapses to the centre, a fan)
 	LPDIRECT3DTEXTURE9 tex[MAXRINGRES];
 	LPDIRECT3DTEXTURE9 pTex;
 	DWORD rres, tres, ntex;

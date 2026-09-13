@@ -198,22 +198,52 @@ typedef struct {
 	DWORD color;					///< beacon color
 } BAVERTEX;
 
+// ORO patch (ah) 2026-09-08: the GPU light, repacked to FOUR float4 (64 bytes; was 76 bytes
+// occupying 6 constant registers). The shaders read exactly position, direction,
+// attenuation, diffuse.rgb, cos(phi), the theta scale and the spot flag - never Dst2,
+// Range, Falloff or diffuse.a (Common.hlsl is the only reader) - so the three scalars
+// ride the spare .w lanes and Type/Dst2 move to D3D9Light. MUST match struct Light in
+// shaders/D3D9Client.fx byte for byte: ID3DXEffect::SetValue copies this raw.
+// Measured with tools/fxeff: 8 lights + cascades on the PBR pass 163 -> 139 registers.
 typedef struct _LightStruct  {
-    int			  Type;             ///< Type of light source
-	float		  Dst2;				///< Square distance between camera and the light emitter
-    D3DXCOLOR     Diffuse;          ///< Color of light
-    D3DXVECTOR3   Position;         ///< position in world space
-    D3DXVECTOR3   Direction;        ///< direction in world space
-    D3DXVECTOR3   Attenuation;      ///< Attenuation
-	D3DXVECTOR4   Param;            ///< range, falloff, theta, phi
-public : _LightStruct () :	Type(0),
-							Dst2(0.0),
-							Diffuse(D3DXCOLOR(0ul)),
-							Position(0,0,0), Direction(1.0f, 0.0f, 0.0f), Attenuation(1.0f, 1.0f, 1.0f),
-							Param(0,0,0,0)
+    D3DXVECTOR4   Position;         ///< xyz position in camera-centred world space, w = cos(phi/2) of a spot (1 for a point)
+    D3DXVECTOR4   Direction;        ///< xyz direction in world space, w = theta scale 1/(cos(u/2)-cos(p/2)) (0 for a point)
+    D3DXVECTOR4   Attenuation;      ///< xyz attenuation a0 a1 a2, w = type (0 point, 1 spot)
+    D3DXCOLOR     Diffuse;          ///< colour x intensity (a unused by the shaders)
+public : _LightStruct () :	Position(0.0f, 0.0f, 0.0f, 1.0f),
+							Direction(1.0f, 0.0f, 0.0f, 0.0f),
+							Attenuation(1.0f, 1.0f, 1.0f, 0.0f),
+							Diffuse(D3DXCOLOR(0ul))
 							{}
 } LightStruct;
 
+
+// ORO patch (ah) step 2: does a caster's bounding sphere (rel = centre - light, radius bsr)
+// intersect a spot cone of half-angle halfCone about axis D? If so, widen the fitted
+// half-angle and far distance to include it (the map is fitted to the CASTERS, not the beam).
+inline bool OroFitCasterSphere(const D3DXVECTOR3& rel, float bsr, const D3DXVECTOR3& D, float halfCone, float& halfFit, float& farFit, bool selfHull = false)
+{
+	float d = D3DXVec3Length(&rel);
+	// A sphere that CONTAINS the light can shadow every direction; the map cannot serve it and it
+	// must not widen the fit for everything else (the SSV pad: a mast standing inside the MLP's
+	// bounding sphere handed the whole 166-degree cone to the map - 80 cm texels on the stack).
+	// ORO 2026-09-13: selfHull lifts the containment skip for the ONE sphere the caller
+	// asked to be shadowed by (LocalLightSelfShadow). Everything below then falls out on
+	// its own: bsr/d clamps to 1, so aR is a right angle, the beam test passes and halfFit
+	// saturates at the full cone - exactly what a hull wrapped around the light needs.
+	// Default false, so every existing call site is unchanged.
+	if (d <= bsr + 0.01f && !selfHull) return false;
+	if (d < 1e-3f) { halfFit = halfCone; if (bsr > farFit) farFit = bsr; return true; }
+	float c = D3DXVec3Dot(&rel, &D) / d;
+	if (c > 1.0f) c = 1.0f; else if (c < -1.0f) c = -1.0f;
+	float aC = acosf(c);
+	float sr = bsr / d; if (sr > 1.0f) sr = 1.0f;
+	float aR = asinf(sr);
+	if (aC - aR > halfCone) return false;			// entirely outside the beam
+	{ float h = aC + aR; if (h > halfCone) h = halfCone; if (h > halfFit) halfFit = h; }
+	if (d + bsr > farFit) farFit = d + bsr;
+	return true;
+}
 
 class D3D9Light : public LightStruct
 {
@@ -229,6 +259,12 @@ public:
 
 		float	cone;
 		int		GPUId;
+		int		Type;				///< ORO patch (ah): CPU-side copy of the type (0 point, 1 spot); the GPU reads Attenuation.w
+		float	Dst2;				///< ORO patch (ah): camera distance squared - CPU only (scene eviction), no longer uploaded
+		float	GetRange() const { return range; }
+		float	GetCosPhi() const { return cosp; }
+		D3DXVECTOR3 Pos3() const { return D3DXVECTOR3(Position.x, Position.y, Position.z); }
+		D3DXVECTOR3 Dir3() const { return D3DXVECTOR3(Direction.x, Direction.y, Direction.z); }
 private:
 		float	cosp, tanp, cosu;
 		float	range, range2;
@@ -601,6 +637,28 @@ bool CopyBuffer(LPDIRECT3DRESOURCE9 _pDst, LPDIRECT3DRESOURCE9 _pSrc);
 void D3D9TuneInit(D3D9Tune *);
 int LoadPlanetTextures(const char* fname, LPDIRECT3DTEXTURE9* ppdds, DWORD flags, int amount);
 float SunOcclusionByPlanet(OBJHANDLE hObj, VECTOR3 gpos);
+
+// ORO patch (aj) 2026-09-12: PLANETARY RINGS. What the addon pushes per ringed planet
+// (gcCore::SetRingLook / SetRingProfile) and what the client's ring pass, planet pass and
+// per-object sun all read back. prm lane map (see gcCore.h): [0] blend, 0 = stock
+// arithmetically; [1] optical-depth trim; [2] lit-face brightness; [3] backlit glow;
+// ROUND 2 (2026-09-12) took the reserved lanes for THE CLOSE-UP, all camera-driven: [4] detail
+// amplitude (grooves + grain in the sheet's own texture), [5] particle amplitude (sparse bright
+// specks), [6] the grain's along-track cell offset and [7] its radial cell offset - both reduced
+// on the CPU so the pattern co-rotates at the camera-radius orbital rate without a float-32
+// angle of 1e5 rad ever reaching the shader - [8] cells per metre along track, [9] cells per
+// metre radially, [10] the along-track cell size [m], [11] the radial one; [12..15] reserved.
+// 16 lanes, same SetRingLook signature: nothing for the codegen to drop. The profile is the client's
+// OWN texture (MANAGED, full box-filtered mip chain) plus a CPU copy of tau decoded from
+// its alpha - 5*a*a - for the per-object sun's ring transmission.
+struct OroRingLook {
+	float prm[16];
+	LPDIRECT3DTEXTURE9 pProfile;
+	int    nProf;
+	float* tau;
+};
+const OroRingLook* gcGetRingLook(OBJHANDLE hPlanet);   // NULL = stock for this planet
+void  gcReleaseRingLooks();                            // scene teardown
 float OcclusionFactor(float x, float sunrad, float plnrad);
 float OcclusionFactor(float x, float r1, float r2, bool bReverse);
 double Distance(vObject *a, vObject* b);

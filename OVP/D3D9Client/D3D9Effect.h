@@ -91,8 +91,10 @@ public:
 	static D3DXHANDLE   ePanelTech;      ///< Used to draw a new style 2D panel
 	static D3DXHANDLE   ePanelTechB;     ///< Used to draw a new style 2D panel
 	static D3DXHANDLE	eBaseTile;
+	static D3DXHANDLE	eWetOverlay;     ///< ORO 2026-09-10: the wet-ground look over runways/pads/taxiways (Mesh.fx WetOverlayTech)
 	static D3DXHANDLE	eRingTech;       ///< Planet rings technique
 	static D3DXHANDLE	eRingTech2;      ///< Planet rings technique
+	static D3DXHANDLE	eRingTechORO;    ///< ORO patch (aj): the ORO ring (linear radius, real tau, lit/unlit faces)
 	static D3DXHANDLE	eShadowTech;     ///< Vessel ground shadows
 	static D3DXHANDLE	eGeometry;
 	static D3DXHANDLE	eBaseShadowTech; ///< Used to draw transparent surface without texture
@@ -121,8 +123,10 @@ public:
 	static D3DXHANDLE	eWater;      ///< Water
 	static D3DXHANDLE	eSun;        ///< Sun
 	static D3DXHANDLE	eLights;     ///< Additional light sources
-	static D3DXHANDLE	eLclShdVP;   ///< ORO patch (z3) 2b: local-light shadow view-proj
-	static D3DXHANDLE	eLclShd;     ///< ORO patch (z3) 2b: slot (-1 = none), 1/mapsize
+	static D3DXHANDLE	eLclShdP;    ///< ORO patch (ah) step 4: per spot map - origin xyz, w = cell*10 + tan(fov/2)
+	static D3DXHANDLE	eLclShdD;    ///< ORO patch (ah) step 4: per spot map - axis xyz, w = range
+	static D3DXHANDLE	eLclShd;     ///< ORO patch (z3) 2b / (ah) 4: live maps, cells per row, first row's v, cell size in texels
+	static D3DXHANDLE	eLclAtl;     ///< ORO patch (ah) step 4: cell width/height in uv, one texel in uv
 	static D3DXHANDLE	eLclShmTex;  ///< ORO patch (z3) 2b: the local-light shadow map
 	static D3DXHANDLE	eKernel;
 	static D3DXHANDLE	eAtmoParams;
@@ -165,10 +169,22 @@ public:
 	static D3DXHANDLE	eCascMap;      ///< TEXTURE ORO patch (ae): the atlas
 	static D3DXHANDLE	eBaseGlow;     ///< FLOAT ORO patch (ac): base night-light glow gain, 1 = stock
 	static D3DXHANDLE	eBaseHalo;     ///< FLOAT ORO patch (ac) part 2: the fog aureole gain, 1 = designed
+	static D3DXHANDLE	eBaseLocal;    ///< FLOAT ORO 2026-09-10 (A5): 1 during base structure draws - drop glint in base-local metres
+	static D3DXHANDLE	eBaseGround;   ///< FLOAT ORO 2026-09-11: 1 during BELOW-SHADOW base surfaces (runway/pad/taxiway) - ground wet darkening
 	static D3DXHANDLE	eWetReflTex;   ///< TEXTURE ORO patch (s) part 6: the planar mirror
 	static D3DXHANDLE	eWetReflPrm;   ///< FLOAT4 ORO patch (s) part 6: 1/W, 1/H, gain, live
 	static D3DXHANDLE	eWetSwimPrm;   ///< FLOAT4 ORO patch (s) part 6: swim amp scale, rate scale, 0, 0
 	static D3DXHANDLE	eWetGrainPrm;  ///< FLOAT4 ORO patch (s) part 7: grain opacity, grain size, 0, 0
+	static D3DXHANDLE	eRingPrm;      ///< FLOAT4 ORO patch (aj): blend, density trim, lit brightness, backlit glow
+	static D3DXHANDLE	eRingRad;      ///< FLOAT4 ORO patch (aj): irad [m], orad [m], 1/(orad-irad), 0
+	static D3DXHANDLE	eRingShd;      ///< FLOAT4 ORO patch (aj): ring plane normal (world) xyz, 0 - the planet's ring shadow
+	static D3DXHANDLE	eRingProf;     ///< TEXTURE ORO patch (aj): the profile, N x 1, linear in radius, A = encoded tau
+	static D3DXHANDLE	eRingPrm2;     ///< FLOAT4 ORO patch (aj) round 2: detail amp, particle amp, along-track cell offset, radial cell offset
+	static D3DXHANDLE	eRingPrm3;     ///< FLOAT4 ORO patch (aj) round 2: cells/m along track, cells/m radial, along-track cell [m], radial cell [m]
+	static D3DXHANDLE	eRingAxR;      ///< FLOAT4 ORO patch (aj) round 2: the camera's RADIAL direction in the ring plane (world) xyz, 0
+	static D3DXHANDLE	eRingAxT;      ///< FLOAT4 ORO patch (aj) round 2: the camera's ALONG-TRACK direction in the ring plane (world) xyz, 0
+	static D3DXHANDLE	eRingCut;      ///< FLOAT4 ORO patch (aj) round 2: camera forward (world) xyz + the near-field seam depth [m] (sign = which side of the seam this draw is; 0 = none)
+	static D3DXHANDLE	eRingPrm4;     ///< FLOAT4 ORO patch (aj) round 2: the look's lanes 12..15 - relief, reserved x3
 	static D3DXHANDLE   eColor;        ///< Auxiliary color input
 	static D3DXHANDLE   eFogColor;     ///< Fog color input
 	static D3DXHANDLE   eTexOff;       ///< Surface tile texture offsets

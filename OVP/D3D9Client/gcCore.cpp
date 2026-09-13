@@ -63,6 +63,11 @@ DLLCLBK void gcBindCoreMethod(void** ppFnc, const char* name)
 	if (strcmp(name,"SetSnowCover")==0) *ppFnc = &gcCore2::SetSnowCover;
 	if (strcmp(name,"SetBaseLights")==0) *ppFnc = &gcCore2::SetBaseLights;
 	if (strcmp(name,"SetVCNightLight")==0) *ppFnc = &gcCore2::SetVCNightLight;
+	if (strcmp(name,"SetDeferVCHUD")==0) *ppFnc = &gcCore2::SetDeferVCHUD;
+	if (strcmp(name,"DrawDeferredVCHUD")==0) *ppFnc = &gcCore2::DrawDeferredVCHUD;
+	if (strcmp(name,"SetWaterMirror")==0) *ppFnc = &gcCore2::SetWaterMirror;
+	if (strcmp(name,"SetRingLook")==0) *ppFnc = &gcCore2::SetRingLook;
+	if (strcmp(name,"SetRingProfile")==0) *ppFnc = &gcCore2::SetRingProfile;
 	if (strcmp(name,"ReleaseSwap")==0) *ppFnc = &gcCore2::ReleaseSwap;
 	if (strcmp(name,"DeleteCustomCamera")==0) *ppFnc = &gcCore2::DeleteCustomCamera;
 	if (strcmp(name,"CustomCameraOnOff")==0) *ppFnc = &gcCore2::CustomCameraOnOff;
@@ -416,6 +421,111 @@ float g_gcVCNight = 1.0f;
 void gcCore::SetVCNightLight(float scale)
 {
 	g_gcVCNight = (scale < 0.0f) ? 0.0f : (scale > 1.0f ? 1.0f : scale);
+}
+
+// --- ORO A7 (2026-09-10): the VC HUD combiner goes last ---------------------------
+// The arm flag is read by the two mesh render paths (Mesh.cpp), the record they leave is
+// consumed by Scene.cpp's OroFlushVCHUD - here on the addon's request, or at the end of the
+// HUD_2ND stage regardless. See the note above D3D9Mesh::Render.
+void gcCore::SetDeferVCHUD(bool bDefer)
+{
+	extern bool g_oroDeferVCHUD;
+	g_oroDeferVCHUD = bDefer;
+}
+
+bool gcCore::DrawDeferredVCHUD()
+{
+	extern bool g_oroHudPending;
+	extern void OroFlushVCHUD();
+	if (!g_oroHudPending) return false;
+	OroFlushVCHUD();
+	return true;
+}
+
+// --- ORO 2026-09-10: the reflection over water --------------------------------------
+// g_gcWaterMirror is what the addon pushed (water under the focus vessel, 0..1);
+// g_oroWaterMirrorK is that times the camera-height fade, written by the mirror pass each
+// frame (Scene.cpp) and carried to the shaders in gWetGrainPrm.w. Default 0 = stock.
+float g_gcWaterMirror  = 0.0f;
+float g_oroWaterMirrorK = 0.0f;
+void gcCore::SetWaterMirror(float water)
+{
+	// 0..2: the addon multiplies the water FRACTION under the vessel (0..1) by the user's
+	// Water mirror slider (0..2), so the ceiling is 2 - the shaders saturate it anyway.
+	g_gcWaterMirror = (water < 0.0f) ? 0.0f : (water > 2.0f ? 2.0f : water);
+}
+
+// ORO patch (aj) 2026-09-12: PLANETARY RINGS - per-planet look + profile, keyed by
+// OBJHANDLE like the exhaust map. The profile is copied into a texture the CLIENT owns
+// (MANAGED: lockable for the CPU tau copy and for D3DXFilterTexture, survives a device
+// reset on its own) with a full BOX-filtered mip chain - the same filter
+// tools/ringprofile.py uses for a file-based profile, so the two agree - and released
+// with the scene (gcReleaseRingLooks, Scene::~Scene). The addon creates NO device
+// resource for it, so it has nothing to hand back under 23(l).
+static std::map<OBJHANDLE, OroRingLook> g_gcRingLook;
+
+static void RingLookFree(OroRingLook& r)
+{
+	if (r.pProfile) r.pProfile->Release();
+	free(r.tau);
+	r.pProfile = NULL; r.tau = NULL; r.nProf = 0;
+}
+
+void gcCore::SetRingLook(OBJHANDLE hPlanet, const float* prm, int count)
+{
+	if (!hPlanet || !prm || count <= 0) return;
+	if (count > 16) count = 16;
+	OroRingLook& r = g_gcRingLook[hPlanet];        // value-initialised (all zero) on first touch
+	for (int i = 0; i < count; i++) r.prm[i] = prm[i];
+	if (r.prm[0] < 0.0f) r.prm[0] = 0.0f;
+	if (r.prm[0] > 1.0f) r.prm[0] = 1.0f;
+	if (r.prm[0] <= 0.0f && !r.pProfile) g_gcRingLook.erase(hPlanet);   // fully stock: forget it
+}
+
+void gcCore::SetRingProfile(OBJHANDLE hPlanet, const void* pBits, int w)
+{
+	if (!hPlanet) return;
+	OroRingLook& r = g_gcRingLook[hPlanet];
+	RingLookFree(r);
+	if (!pBits || w < 2 || w > 16384) {
+		if (r.prm[0] <= 0.0f) g_gcRingLook.erase(hPlanet);
+		return;
+	}
+	LPDIRECT3DDEVICE9 pDev = g_client->GetDevice();
+	LPDIRECT3DTEXTURE9 pDst = NULL;
+	// Levels 0 = the full chain down to 1 x 1.
+	if (pDev->CreateTexture(w, 1, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &pDst, NULL) != S_OK) return;
+	bool ok = false;
+	D3DLOCKED_RECT lr;
+	if (pDst->LockRect(0, &lr, NULL, 0) == S_OK) {
+		memcpy(lr.pBits, pBits, (size_t)w * 4);
+		pDst->UnlockRect(0);
+		ok = (D3DXFilterTexture(pDst, NULL, 0, D3DX_FILTER_BOX) == S_OK);
+	}
+	if (ok) {
+		r.tau = (float*)malloc(sizeof(float) * w);
+		if (r.tau) {
+			const BYTE* px = (const BYTE*)pBits;                  // B,G,R,A
+			for (int i = 0; i < w; i++) { const float a = px[i * 4 + 3] / 255.0f; r.tau[i] = 5.0f * a * a; }
+			r.nProf = w;
+		} else ok = false;
+	}
+	if (!ok) { pDst->Release(); free(r.tau); r.tau = NULL; r.nProf = 0; return; }
+	r.pProfile = pDst;
+}
+
+const OroRingLook* gcGetRingLook(OBJHANDLE hPlanet)
+{
+	std::map<OBJHANDLE, OroRingLook>::const_iterator it = g_gcRingLook.find(hPlanet);
+	if (it == g_gcRingLook.end() || it->second.prm[0] <= 0.0f || !it->second.pProfile) return NULL;
+	return &it->second;
+}
+
+void gcReleaseRingLooks()
+{
+	for (std::map<OBJHANDLE, OroRingLook>::iterator it = g_gcRingLook.begin(); it != g_gcRingLook.end(); ++it)
+		RingLookFree(it->second);
+	g_gcRingLook.clear();
 }
 
 // Queried by vVessel::RenderReentry (declared extern there - no header churn for one bool).

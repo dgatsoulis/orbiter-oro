@@ -230,6 +230,8 @@ public:
 
 	bool			ParseConfig(const char *fname);
 	void			RenderBaseDepth (const LPD3DXMATRIX pVP, int opt = 1);   // ORO patch (z2): opt 1 = GBUF_DEPTH; (z3): opt 0 = a light's shadow map
+	int			FitBaseLocalShadowCasters(const D3DXVECTOR3& P, const D3DXVECTOR3& D, float range, float halfCone, float& halfFit, float& farFit);	// ORO patch (ah) step 2
+	int			AimBaseLocalShadowCasters(const D3DXVECTOR3& P, float range, D3DXVECTOR3& sum, float& weight);	// ORO patch (ah) step 5
 					// (public: Scene's NORMAL_DEPTH pass calls it; RenderBaseStructures stays
 					// protected because only vPlanet::Render ever calls that one)
 	virtual bool	GetMinMaxDistance(float *zmin, float *zmax, float *dmin);
@@ -250,6 +252,7 @@ public:
 	void			CheckResolution ();
 	void			RenderZRange (double *nplane, double *fplane);
 	bool			Render(LPDIRECT3DDEVICE9 dev);
+	void			RenderRingsNearField(LPDIRECT3DDEVICE9 dev, float zPlanetNear);   // ORO patch (aj) round 2: the sheet nearer than the depth the planet pass cut at (its near plane / this planet's dist_scale), drawn after the hulls in Scene's z-clear mode
 	void			RenderBeacons(LPDIRECT3DDEVICE9 dev);
 	void            RenderVectors (LPDIRECT3DDEVICE9 dev, D3D9Pad* pSkp);
 	bool			CameraInAtmosphere() const;
@@ -315,6 +318,7 @@ public:
 	FVECTOR3		HDR(FVECTOR3 i);
 	FVECTOR3		LightFX(FVECTOR3 x);
 	float			SunOcclusionByPlanet();
+	float			OroRingTransmission(const VECTOR3& rel) const;   // ORO patch (aj): sun transmission through THIS planet's rings at a planet-relative point (1 = clear)
 	bool			SphericalShadow();
 	void			SetupEclipse();
 	void			InitEclipse(ShaderClass* pShader);
@@ -375,6 +379,8 @@ public:
 
 protected:
 	void RenderSphere (LPDIRECT3DDEVICE9 dev);
+	bool PushRingBracket(float cut);   // ORO patch (aj): the ring uniforms + profile for this planet; false = no look pushed (stock path). cut = the near-field seam depth [m] for gRingCut: > 0 planet pass, < 0 near-field draw, 0 none
+	void ClearRingBracket();     //   blend 0 = "no ring" for every reader (the scoped-uniform law)
 	void RenderCloudLayer (LPDIRECT3DDEVICE9 dev, DWORD cullmode);
 	void RenderBaseSurfaces (LPDIRECT3DDEVICE9 dev);
 	void RenderBaseStructures (LPDIRECT3DDEVICE9 dev);

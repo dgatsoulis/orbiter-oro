@@ -136,6 +136,10 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
 	ptLclShm = NULL;
 	psLclShm = NULL;
 	psLclShmDS = NULL;
+	lclScratchSize = 0;
+	ptLclAtl = NULL; psLclAtl = NULL; lclAtlCols = lclAtlRows = lclCellPx = 0;	// ORO patch (ah) step 4
+	memset(lsmaps, 0, sizeof(lsmaps)); for (int k = 0; k < 6; k++) { lsmaps[k].idx = -1; lsmaps[k].cell = -1; }
+	nLclMaps = 0; lsTerrainOK = false; nLclPrev = 0; memset(lclPrevLe, 0, sizeof(lclPrevLe));
 	pTileShd = NULL;
 	pTileDepth = NULL;	// ORO patch (ab)
 	ptCasc = NULL; psCasc = NULL; psCascDS = NULL; cascSize = 0; cascLive = false; cascLclLive = false;   // ORO patch (ae)
@@ -143,8 +147,6 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
 	for (int i = 0; i < 9; i++) { cascAnch[i] = _V(0, 0, 0); cascAnchTexel[i] = 0.0f; cascAnchOK[i] = false; }
 	cascAnchPlanet = NULL; cascDbgAnchD = 0.0f;
 	cascVes[0] = cascVes[1] = cascVes[2] = NULL; cascU = cascV = cascL = D3DXVECTOR3(0, 0, 0);
-	memset(&lsmap, 0, sizeof(lsmap));
-	lsmap.idx = -1;
 	memset(&LightOwners, 0, sizeof(LightOwners));
 
 
@@ -292,8 +294,18 @@ Scene::Scene(D3D9Client *_gc, DWORD w, DWORD h)
 		HR(pDevice->CreateTexture(lsize, lsize, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT, &ptLclShm, NULL));
 		if (ptLclShm) {
 			HR(ptLclShm->GetSurfaceLevel(0, &psLclShm));
-			lsmap.pShadowMap = ptLclShm;
-			lsmap.size = (int)lsize;
+			lclScratchSize = (int)lsize;
+			// ORO patch (ah) step 4: the LOCAL ATLAS for modes 0-2 when more than one map is
+			// asked for - 2x2 (up to four maps) or 3x2 (six) HALF-SIZE cells, 16 or 24 MB at a
+			// 2048 scratch. In Cascaded mode the maps ride the cascade atlas' spare row instead
+			// (six half-cells already there - no new VRAM).
+			if (Config->LocalLightShadowMaps > 1 && Config->TerrainShadowing != 3) {
+				lclAtlCols = (Config->LocalLightShadowMaps <= 4) ? 2 : 3;
+				lclAtlRows = 2;
+				lclCellPx  = (int)lsize / 2;
+				HR(pDevice->CreateTexture(lclAtlCols * lclCellPx, lclAtlRows * lclCellPx, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT, &ptLclAtl, NULL));
+				if (ptLclAtl) HR(ptLclAtl->GetSurfaceLevel(0, &psLclAtl));
+			}
 			// ORO patch (z3) round 2c: the depth-only tile shader for terrain casters
 			pTileShd = new ShaderClass(pDevice, "Modules/D3D9Client/NewPlanet.hlsl", "TileShdVS", "TileShdPS", "OroLclTileShd", NULL);
 		}
@@ -434,6 +446,7 @@ Scene::~Scene ()
 	pDevice->SetRenderTarget(3, NULL);
 
 	g_gcSceneDepth = NULL;   // ORO patch (g): before the depth texture is released below
+	gcReleaseRingLooks();    // ORO patch (aj): the client-owned ring profile textures die with the scene
 	for (int i = 0; i < ARRAYSIZE(psgBuffer); i++) SAFE_RELEASE(psgBuffer[i]);
 	for (int i = 0; i < ARRAYSIZE(ptgBuffer); i++) SAFE_RELEASE(ptgBuffer[i]);
 	for (int i = 0; i < ARRAYSIZE(pTextures); i++) SAFE_RELEASE(pTextures[i]);
@@ -479,6 +492,8 @@ Scene::~Scene ()
 	SAFE_RELEASE(psLclShm);
 	SAFE_RELEASE(psLclShmDS);
 	SAFE_RELEASE(ptLclShm);
+	SAFE_RELEASE(psLclAtl);	// ORO patch (ah) step 4
+	SAFE_RELEASE(ptLclAtl);
 	// ORO patch (ae): the cascade atlas
 	SAFE_RELEASE(psCasc);
 	SAFE_RELEASE(psCascDS);
@@ -1264,12 +1279,19 @@ void Scene::AddLocalLight(const LightEmitter *le, const vObject *vo)
 	// Replace or Add
 	//
 	if (nLights == MAX_SCENE_LIGHTS) {
-		if (lght.Dst2 > lmaxdst2) return;
-		DWORD imax = 0;
-		for (DWORD i = 0; i < MAX_SCENE_LIGHTS; i++) if (Lights[i].Dst2 > lmaxdst2) imax = i;
+		// ORO patch (ah) 2026-09-08: evict the TRUE farthest. Stock scanned for Dst2 > lmaxdst2 -
+		// strictly greater than the running maximum - which after the first eviction matched
+		// nothing, so imax stayed 0: the newest nearby light always replaced slot 0 and lmaxdst2
+		// shrank to its distance, refusing everything farther. With more than 24 emitters near
+		// the camera the kept set depended on registration order and camera position, and the
+		// lighting popped as the camera moved (the SSV pad reports, 2026-09-07).
+		DWORD imax = 0; float dmax = Lights[0].Dst2;
+		for (DWORD i = 1; i < MAX_SCENE_LIGHTS; i++) if (Lights[i].Dst2 > dmax) { dmax = Lights[i].Dst2; imax = i; }
+		if (lght.Dst2 >= dmax) return;
 		Lights[imax] = lght;
 		LightOwners[imax] = vo;		// ORO patch (z3)
-		lmaxdst2 = lght.Dst2;
+		lmaxdst2 = 0.0f;
+		for (DWORD i = 0; i < MAX_SCENE_LIGHTS; i++) if (Lights[i].Dst2 > lmaxdst2) lmaxdst2 = Lights[i].Dst2;
 	}
 	else {
 		Lights[nLights] = lght;
@@ -1304,7 +1326,7 @@ void Scene::ComputeLocalLightsVisibility()
 	{
 		if (Lights[i].cone > 0.0f) {
 			LLCBuf[nGlares].index = float(nGlares);
-			LLCBuf[nGlares].pos = Lights[i].Position;
+			LLCBuf[nGlares].pos = Lights[i].Pos3();	// ORO patch (ah)
 			LLCBuf[nGlares].cone = Lights[i].cone;
 			Lights[i].GPUId = nGlares;
 			nGlares++;
@@ -1510,6 +1532,38 @@ static void OroFogFrame(Scene* scn)
 // The cockpit interior is clear air (patch (s)'s "the interior is dry", for the fog):
 // K goes to 0 for the cockpit draw and back after. What is seen THROUGH the glass keeps
 // its fog - it is drawn in the main pass with K at 1.
+// ORO A7 (2026-09-10): draw the VC HUD combiner the cockpit render held back - see the
+// note above D3D9Mesh::Render. Called by gcCore::DrawDeferredVCHUD from inside the
+// addon's HUD_2ND callback (its chosen point: after the world effects, before the
+// physiological ones) and, unconditionally, by RenderMainScene at the end of that stage.
+// The replay runs under the cockpit's own bracket - the interior is DRY and in CLEAR AIR
+// (patches (s) and (aa)) - or the HUD quad would take the exterior's wet-hull glint and
+// haze. Everything else the quad needs (its texture, material and blend) the mesh render
+// sets itself; ZENABLE is off for the HUD branch by design, so the depth buffer's state
+// at this point does not matter. A no-op when nothing is pending, and it can never draw
+// twice: the record is consumed by whichever caller comes first.
+void OroFogInterior(bool bInterior);
+void OroFlushVCHUD()
+{
+	extern bool g_oroHudPending, g_oroReplayVCHUD;
+	extern D3D9Mesh* g_oroHudMesh; extern D3DXMATRIX g_oroHudW; extern int g_oroHudTech;
+	extern float g_gcWetGlint, g_gcSurfaceWet;
+	if (!g_oroHudPending) return;
+	g_oroHudPending = false;
+	D3D9Mesh* pM = g_oroHudMesh;
+	g_oroHudMesh = NULL;
+	if (!pM) return;
+	if (D3D9Effect::eWetGlint) D3D9Effect::FX->SetFloat(D3D9Effect::eWetGlint, 0.0f);
+	if (D3D9Effect::eSurfWet)  D3D9Effect::FX->SetFloat(D3D9Effect::eSurfWet, 0.0f);
+	OroFogInterior(true);
+	g_oroReplayVCHUD = true;
+	pM->Render(&g_oroHudW, g_oroHudTech, NULL, 0);
+	g_oroReplayVCHUD = false;
+	OroFogInterior(false);
+	if (D3D9Effect::eWetGlint) D3D9Effect::FX->SetFloat(D3D9Effect::eWetGlint, g_gcWetGlint);
+	if (D3D9Effect::eSurfWet)  D3D9Effect::FX->SetFloat(D3D9Effect::eSurfWet, g_gcSurfaceWet);
+}
+
 void OroFogInterior(bool bInterior)
 {
 	g_oroFogPrm[5][0] = bInterior ? 0.0f : 1.0f;
@@ -1920,6 +1974,10 @@ void Scene::RenderMainScene()
 
 
 
+	// ORO A7: the deferred VC HUD record is PER FRAME - never let a mesh pointer from a
+	// frame that skipped its overlay stage reach a frame the mesh might not exist in.
+	{ extern bool g_oroHudPending; extern D3D9Mesh* g_oroHudMesh; g_oroHudPending = false; g_oroHudMesh = NULL; }
+
 	// ---------------------------------------------------------------------------------------------
 	// Start Rendering of Normal and Depth Buffer for SSAO and (point in scene) visibility checks
 	// ---------------------------------------------------------------------------------------------
@@ -2013,8 +2071,9 @@ void Scene::RenderMainScene()
 					if (casc[1].live) {
 						char tx[256]; int n = 0;
 						for (int k = 0; k < 9; k++) n += sprintf_s(tx + n, sizeof(tx) - n, " %.3f", casc[k].live ? casc[k].texel : 0.0f);
-						oapiWriteLogV("ORO shadow dbg: cascades (last frame): slot1 anchor-camera %.2f m; texels (slots 0-8):%s m; hull boxes %d",
-							cascDbgAnchD, tx, (int)(cascVes[0] != NULL) + (int)(cascVes[1] != NULL) + (int)(cascVes[2] != NULL));
+						oapiWriteLogV("ORO shadow dbg: cascades (last frame): slot1 anchor-camera %.2f m; texels (slots 0-8):%s m; hull boxes %d; slope clamp %.1f offset %.2f tx",
+							cascDbgAnchD, tx, (int)(cascVes[0] != NULL) + (int)(cascVes[1] != NULL) + (int)(cascVes[2] != NULL),
+							Config->ShadowCascadeSlope, Config->ShadowCascadeOffset);
 					}
 					oapiWriteLogV("ORO shadow dbg: frame %u  registry %u  depth-pass tiles %d (stamp-skipped %d)  cam moved %.3f m  tol %.2f + %.4f/m  storm %.2f fogSunCam %.3f  |  stencil (last frame): vessels drawn %d skipped %d (depth %.3f fade %.3f dv %.3f)  structures drawn %d skipped %d",
 						dwFrameId, (unsigned)LclTiles.size(), g_oroDbgTileDrawn, g_oroDbgTileSkip, length(cd),
@@ -2054,7 +2113,29 @@ void Scene::RenderMainScene()
 	bWetReflLive = false;
 	{
 		extern float g_gcSurfaceWet;
-		if (g_gcSurfaceWet > 0.01f && psWetRefl && psWetReflDS && Camera.hObj_proxy)
+		// ORO 2026-09-10: THE REFLECTION OVER WATER, RAIN OR NOT (his ask: "always on when
+		// the vessel is over a water surface"). g_gcWaterMirror is the addon's "water under
+		// the focus vessel" (0..1, from the planet's own water mask - gcCore::SetWaterMirror);
+		// it opens the pass like wetness does, and the terrain shader adds it to the mirror
+		// strength where the mask says water. Its OWN height law: a puddle is unreadable
+		// from a few hundred metres up, but a ship's reflection on open water is plainly
+		// visible in aerial photographs from far higher, so a 250 m cut would pop off in a
+		// wide shot. Full to 500 m camera height, faded to zero by 1500 m - the fade rides
+		// g_oroWaterMirrorK into gWetGrainPrm.w (a free lane; the terrain shader has no
+		// register to spare) and the pass gate opens to 1500 m so the fade finishes before
+		// the pass stops. Puddles keep their 250 m. Nothing changes when nobody pushes it.
+		extern float g_gcWaterMirror, g_oroWaterMirrorK;
+		g_oroWaterMirrorK = 0.0f;
+		// ⚠️ "NO VESSEL NEAR THE CAMERA, NO PASS" (his call, 2026-09-10). Over water this
+		// would otherwise run on every low ocean flight with nothing to put in the mirror,
+		// and the mirror only ever shows VESSELS - so a vessel within 2 km of the camera is
+		// the whole test. The RAIN case is deliberately NOT gated on it: its 250 m ceiling
+		// already bounds it, and its approved look includes puddles on an empty apron.
+		bool bVesNear = false;
+		for (auto* vVes : RenderList) if (vVes->CamDist() < 2000.0) { bVesNear = true; break; }
+		const bool  bWater  = (g_gcWaterMirror > 0.01f) && bVesNear;
+		const double aglMax = bWater ? 1500.0 : 250.0;
+		if ((g_gcSurfaceWet > 0.01f || bWater) && psWetRefl && psWetReflDS && Camera.hObj_proxy)
 		{
 			VECTOR3 pC; oapiGetGlobalPos(Camera.hObj_proxy, &pC);
 			VECTOR3 rel = Camera.pos - pC;
@@ -2086,8 +2167,14 @@ void Scene::RenderMainScene()
 					if (pa > 0.3 && pa < 400.0) planeAGL = pa;
 				}
 			}
-			if (cr > 1.0 && hAGL > 1.0 && hAGL < 250.0)
+			if (cr > 1.0 && hAGL > 1.0 && hAGL < aglMax)
 			{
+				// the water term's height fade (see above): 1 to 500 m, 0 at 1500 m
+				if (bWater) {
+					double f = (1500.0 - hAGL) / 1000.0;
+					if (f > 1.0) f = 1.0; if (f < 0.0) f = 0.0;
+					g_oroWaterMirrorK = g_gcWaterMirror * (float)f;
+				}
 				VECTOR3 up = rel / cr;
 				// plane through the ground point under the FOCUS VESSEL (see above),
 				// in the client's camera-relative world space (camera = origin)
@@ -2280,8 +2367,11 @@ void Scene::RenderMainScene()
 		// grouping. Anyone hunting the blur will look in gWetReflPrm first; this note is
 		// the signpost. See SetWetReflection's fBlur.
 		extern float g_gcWetBlur;
+		// ⚠️ .w CARRIES THE WATER MIRROR STRENGTH (2026-09-10) - the same transport rule as
+		// .z: this vector's spare lane, because the terrain shader is on its register ceiling.
+		extern float g_oroWaterMirrorK;
 		if (D3D9Effect::eWetGrainPrm) {
-			D3DXVECTOR4 wgp(g_gcWetGrainOp, g_gcWetGrainSize, g_gcWetBlur, 0.0f);
+			D3DXVECTOR4 wgp(g_gcWetGrainOp, g_gcWetGrainSize, g_gcWetBlur, g_oroWaterMirrorK);
 			D3D9Effect::FX->SetVector(D3D9Effect::eWetGrainPrm, &wgp);
 		}
 		if (bWetReflLive && D3D9Effect::eWetReflTex)
@@ -2432,8 +2522,16 @@ void Scene::RenderMainScene()
 	m_celSphere->Render(pDevice, sky_color);
 
 	// Set Initial Near clip plane distance
-	if (bClearZBuffer) SetCameraFrustumLimits(1e3, 3e8f);
-	else			   SetCameraFrustumLimits(znear_for_vessels, 3e8f);
+	// ORO patch (aj) round 2: the planet pass's near plane is named, because the near-field
+	// ring draw after the vessels must clip on EXACTLY this depth (see below).
+	// !! In a COCKPIT view (no z-clear) the planets draw on znear_for_vessels, which the
+	// farthest vessel in view sets - a ship thousands of km away puts it near 1 km too, and
+	// scaled by a ringed planet's dist_scale that cut the sheet 26 km out in his cockpit
+	// screenshots. So the near-field draw runs in EVERY main-scene view, on whichever near
+	// plane this pass actually used.
+	const float zPlanetNear = bClearZBuffer ? 1e3f : znear_for_vessels;
+	m_ringNearCut = zPlanetNear;   // the ring bracket reads it (vPlanet::Render); cleared after the near-field draw
+	SetCameraFrustumLimits(zPlanetNear, 3e8f);
 
 	pDevice->SetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);
 
@@ -2530,6 +2628,7 @@ void Scene::RenderMainScene()
 
 	RenderLocalLightShadowMap();
 	RenderCascadeShadows();   // ORO patch (ae): the sun's cascade atlas - before the planets, which consume it
+	PushLocalShadowConstants();   // ORO patch (ah) step 4: the mesh family's spot shadow maps, once per frame - the cells are final now
 
 
 	// ---------------------------------------------------------------------------------------------
@@ -2825,6 +2924,24 @@ void Scene::RenderMainScene()
 		RenderList.front()->Render(pDevice);
 		RenderList.pop_front();
 	}
+
+	// -------------------------------------------------------------------------------------------------------
+	// ORO patch (aj) round 2: THE NEAR-FIELD RING. The planets were drawn with zPlanetNear
+	// as their near plane - on geometry each planet SHRINKS toward the eye by its own
+	// dist_scale - so the sheet of any ring the camera is inside was cut along a straight
+	// line at zPlanetNear / dist_scale of real depth. This draws the part NEARER than that
+	// on the current frustum, after the hulls (depth test on, write off, a user clip plane
+	// - vPlanet::RenderRingsNearField, which owns the plane because the scale is per
+	// planet). In every main-scene view: the z-clear external one AND the cockpit views,
+	// where the cut was the vessel near plane's. Before the exhausts and beacons, so a
+	// plume above the sheet composites over it.
+	// -------------------------------------------------------------------------------------------------------
+	for (DWORD i = 0; i < nplanets; i++) {
+		if (!plist[i].vo->IsActive()) continue;
+		if (oapiGetObjectType(plist[i].vo->Object()) != OBJTP_PLANET) continue;
+		static_cast<vPlanet*>(plist[i].vo)->RenderRingsNearField(pDevice, zPlanetNear);
+	}
+	m_ringNearCut = 0.0f;   // the probe/mirror passes at the top of the next frame draw whole rings
 
 	D3D9Pad* pSketch = GetPooledSketchpad(SKETCHPAD_LABELS);
 	if (pSketch) {
@@ -3193,6 +3310,10 @@ void Scene::RenderMainScene()
 		gc->MakeRenderProcCall(pSketch, RENDERPROC_HUD_2ND, NULL, NULL);
 		pSketch->EndDrawing(); // SKETCHPAD_2D_OVERLAY
 	}
+	OroFlushVCHUD();			// ORO A7: the deferred VC HUD, if the addon did not draw it
+								// mid-stage (see Mesh.cpp). UNCONDITIONAL and outside the
+								// pSketch guard for patch (t)'s reason: a frame in which the
+								// callback did not run must still show its HUD.
 	gc->ChromeDeferFlush();		// ...and put them back ON TOP of the addon overlay, so a
 								// full-frame effect cannot smear Orbiter's own UI.
 								// UNCONDITIONAL, outside the pSketch guard on purpose: a
@@ -3863,16 +3984,21 @@ void Scene::GetCascadeConstants(D3DXVECTOR4* basis, D3DXVECTOR4* A, D3DXVECTOR4*
 {
 	basis[0] = D3DXVECTOR4(cascU.x, cascU.y, cascU.z, (float)Config->ShadowDebug);   // .w: the terrain's copy of the debug mode
 	basis[1] = D3DXVECTOR4(cascV.x, cascV.y, cascV.z, (float)Config->ShadowCascadeSoft);   // .w: the soft-far-shadows switch (the terrain's tent)
-	basis[2] = D3DXVECTOR4(cascL.x, cascL.y, cascL.z, 0.0f);
+	basis[2] = D3DXVECTOR4(cascL.x, cascL.y, cascL.z, (float)Config->ShadowCascadeOffset);   // .w: the taps' normal offset in texels (the 2026-09-13 moire fix)
 	// the texels packed four to a register (slot k = tx[k / 4][k % 4]); the slots' uv
 	// rectangles are fixed by the atlas layout and computed in the shaders - a pushed
-	// rect per slot was the register that put the vessel family over ps_3_0's 224
+	// rect per slot was the register that put the vessel family over ps_3_0's 224.
+	// THE SPARE LANES CARRY THE MOIRE FIX'S KNOBS (2026-09-13): nine slots fill tx[0..1]
+	// and tx[2].x, so tx[2].y takes the slope clamp - a tunable that costs the terrain
+	// shader, at c221 of 224, no register at all. (The mesh family's copy of the same two
+	// numbers rides gCascTx[1].w and gCascBasis[1].w - RenderCascadeShadows sets them.)
 	float t[12] = { 0 };
 	for (int i = 0; i < 9; i++) {
 		A[i] = D3DXVECTOR4(0, 0, 0, 0);
 		if (live && casc[i].live) { A[i] = casc[i].A; t[i] = casc[i].texel; }
 	}
 	for (int k = 0; k < 3; k++) tx[k] = D3DXVECTOR4(t[4 * k], t[4 * k + 1], t[4 * k + 2], t[4 * k + 3]);
+	tx[2].y = (float)Config->ShadowCascadeSlope;
 	*split = live ? D3DXVECTOR4(cascSplit[0], cascSplit[1], cascSplit[2], cascSplit[3]) : D3DXVECTOR4(0, 0, 0, 0);
 	*atl   = live ? cascAtl : D3DXVECTOR4(0, 0, 0, 0);
 }
@@ -3880,8 +4006,7 @@ void Scene::GetCascadeConstants(D3DXVECTOR4* basis, D3DXVECTOR4* A, D3DXVECTOR4*
 void Scene::RenderCascadeShadows()
 {
 	cascLive = false;
-	cascLclLive = false;
-	for (int i = 0; i < 9; i++) casc[i].live = false;
+	for (int i = 0; i < 9; i++) casc[i].live = false;	// (cascLclLive is the local pass's - ORO patch (ah) step 4)
 	cascVes[0] = cascVes[1] = cascVes[2] = NULL;
 	if (!ptCasc || !psCasc || !psCascDS || !pTileShd) return;
 	if (Config->TerrainShadowing != 3) return;
@@ -3996,20 +4121,14 @@ void Scene::RenderCascadeShadows()
 	smap = save;
 	cascLive = true;
 
-	// ROUND 8 - THE LIGHT JOINS THE ATLAS. The (z3) local-light map was rendered just
-	// before this pass (RenderLocalLightShadowMap, the call above ours); copy it into
-	// the spare row's first cell (half-size - 2048 -> 1024, point-sampled: a depth map
-	// must not be averaged) so the TERRAIN reads it from the same texture as the sun's
-	// cascades. That is the whole daylight fix: the terrain receiver used to BORROW the
-	// tShadowMap slot for the local map and yield its sun shadow (the 16-sampler
-	// ceiling), so the borrow was night-only and a beam painted through a wall by day
-	// (his Moon flight). In the atlas nothing is borrowed and nothing is gated. Vessels
-	// keep the full-size map through their own sampler.
-	if (lsmap.idx >= 0 && psLclShm) {
-		const int q = cascSize / 2;
-		RECT dst = { 0, 3 * q, q, 4 * q };
-		if (SUCCEEDED(pDevice->StretchRect(psLclShm, NULL, psCasc, &dst, D3DTEXF_POINT))) cascLclLive = true;
-	}
+	// ROUND 8 / ORO patch (ah) step 4 - THE LIGHTS JOIN THE ATLAS. The local-light maps were
+	// copied into the spare row's cells (half-size, point-sampled - a depth map must not be
+	// averaged) by RenderLocalLightShadowMap, which runs before this pass; the clear above
+	// touches rows 0-2 only, so the cells survive it. The TERRAIN reads them from the same
+	// texture as the sun's cascades - that is the whole daylight fix: the terrain receiver
+	// used to BORROW the tShadowMap slot for the local map and yield its sun shadow (the
+	// 16-sampler ceiling), so the borrow was night-only and a beam painted through a wall by
+	// day (his Moon flight). In the atlas nothing is borrowed and nothing is gated.
 
 	// INSTRUMENT (ShadowDebug >= 3): dump the atlas once, a few hundred frames in, so the
 	// slot contents can be looked at directly instead of inferred from shadows.
@@ -4037,6 +4156,12 @@ void Scene::RenderCascadeShadows()
 	for (int k = 0; k < 7; k++) { Afx[k] = A[fxSlot[k]]; tfx[k] = casc[fxSlot[k]].live ? casc[fxSlot[k]].texel : 0.0f; }
 	txfx[0] = D3DXVECTOR4(tfx[0], tfx[1], tfx[2], tfx[3]);
 	txfx[1] = D3DXVECTOR4(tfx[4], tfx[5], tfx[6], tfx[7]);
+	// THE MOIRE FIX'S KNOBS, in the two lanes this family never read (2026-09-13): the
+	// eighth texel lane (seven slots) takes the slope clamp, and V.w - the terrain's
+	// soft-far switch, which the mesh taps have no tent to spend - takes the normal
+	// offset. Zero new registers on a family that was X4507 three times in round 6.
+	txfx[1].w  = (float)Config->ShadowCascadeSlope;
+	basis[1].w = (float)Config->ShadowCascadeOffset;
 	if (D3D9Effect::eCascBasis) D3D9Effect::FX->SetVectorArray(D3D9Effect::eCascBasis, basis, 2);
 	if (D3D9Effect::eCascA)     D3D9Effect::FX->SetVectorArray(D3D9Effect::eCascA, Afx, 7);
 	if (D3D9Effect::eCascTx)    D3D9Effect::FX->SetVectorArray(D3D9Effect::eCascTx, txfx, 2);
@@ -4066,182 +4191,416 @@ void Scene::RenderLocalLightShadowMap()
 
 // ===========================================================================================
 //
+// ===========================================================================================
+// ORO patch (ah) step 4 (2026-09-09): N SPOT MAPS. Up to Config->LocalLightShadowMaps (1/2/4/6)
+// perspective depth maps per frame - one per shadow-casting SPOT light, or per CLUSTER of
+// lights that stand together and aim alike (a lamp bank on one mast shares a map rendered from
+// its centroid with the union of the cones) - ranked by score with the incumbents boosted (the
+// step-2 hysteresis, per map). Each renders into the scratch target and is copied into its
+// cell: the cascade atlas' spare row in mode 3 (six half-size cells, nothing borrowed, day and
+// night), the local atlas in modes 0-2 (2x2 or 3x2 half-size cells), or left in the scratch at
+// full size when one map is all there is. A light learns which map shadows it in its OWN
+// struct - Lights[i].Diffuse.a = cell + 1 - so every mesh's and tile's light copy carries the
+// index for free, and the receivers rebuild a map's frame from (origin, tan(fov/2)) and (axis,
+// range) with the near plane at ORO_LCL_NF x range (Common.hlsl / NewPlanet.hlsl twins).
+// The FAR PLANE IS THE LIGHT'S REACH again: step 2 fitted it to the farthest vessel or
+// building, which clipped a caster's shadow off the ground beyond it and kept terrain ridges
+// (never in the fit) out of the map. Only the field of view is fitted.
+//
+static const float ORO_LCL_NF = 0.0075f;	// near / far - the receivers assume it (0.75 m on a 100 m light, the old floor)
+
+// ORO patch (ah) step 5 (2026-09-09): POINT LIGHTS CAST TOO. A point light has no axis, so its
+// map is AIMED - at the solid-angle-weighted direction of the visible casters within reach - and
+// fitted to them like a spot's (a pseudo-spot; a light with nothing to cast gets no cell). With
+// the Launchpad's "Cube (5 maps)" a point light takes FIVE cells when five are free: faces down,
+// +X, -X, +Z, -Z of a basis on the local vertical (the sky face has nothing to shadow), each a
+// 93-degree map from the light, and the receivers pick the face from the dominant axis of the
+// light-to-pixel vector (Common.hlsl / NewPlanet.hlsl: the light's index is 100 + the base cell).
+// SPOTS RANK FIRST: the spot shadows are the flagship and ORO's own lightning flash is a 15 km
+// point light on the focus vessel - it may borrow a spare cell for a flash's building shadows,
+// never displace a pad's floods. A point map's far plane is capped at ORO_LCL_PT_RANGE.
+static const float ORO_LCL_PT_HALF  = 1.2f;		// an aimed map's cone ceiling (half angle) - the fit narrows from here
+static const float ORO_LCL_PT_RANGE = 1000.0f;	// a point map's far plane cap [m]
+static const float ORO_LCL_CUBE_TAN = 1.05f;		// a cube face's tan(fov/2): 90 degrees plus margin; the receivers assume it
+
 void Scene::RenderLocalLightShadowMap2(const std::vector<LCLTILECASTER>& tiles)
 {
-	lsmap.idx = -1;
-	lsmap.terrainOK = false;
+	for (int k = 0; k < 6; k++) { lsmaps[k].idx = -1; lsmaps[k].cell = -1; lsmaps[k].le = NULL; lsmaps[k].kind = 0; }
+	nLclMaps = 0;
+	lsTerrainOK = false;
+	cascLclLive = false;
+	if (Lights) for (DWORD i = 0; i < nLights; i++) Lights[i].Diffuse.a = 0.0f;	// no map, until one is assigned below
 
 	if (!ptLclShm || !psLclShm || !psLclShmDS) return;
 	if (!bLocalLight || !Lights || nLights == 0) return;
 	if (Config->LocalLightShadows == 0) return;
 
-	// ⚠️ THE NIGHT GATE IS THE TERRAIN'S ALONE SINCE 2026-09-05 (his Brighton Beach
-	// day test: the DG's land light lit a vessel behind a hangar in full lunar
-	// daylight - a VESSEL-receiver case the old whole-system gate was silencing).
-	// The daylight conflict was only ever the TERRAIN receiver's: it borrows the
-	// sun map's sampler slot (the 16-sampler ceiling), so a beam-lit tile yields
-	// its SUN shadow - invisible at night, but while the sun still paints it ate
-	// the vessel's own shadow in tile-shaped bites (flown, 2026-09-03). The VESSEL
-	// shaders bind both maps with headroom and never had the conflict. So: the map
-	// BUILDS whenever a qualifying spot exists (no light on = no map = no cost),
-	// vessels receive day and night, casters and tile registration key off idx as
-	// ever - and ONLY the terrain borrow keeps a sun-elevation gate (terrainOK,
-	// consumed in Surfmgr2's per-tile slot match).
-	// KNOWN AND ACCEPTED: the ground pool paints through a wall while the gate is
-	// closed - the sampler ceiling has not moved; the honest fix is a sun+local
-	// map atlas (shelved), and the ceiling is a Vulkan-requirements line.
-	lsmap.terrainOK = true;
-	if (Camera.vProxy) {
-		D3DXVECTOR3 up = -Camera.vProxy->GetBoundingSpherePosDX();
+	// where the maps live this frame (see the step-4 header): the cascade atlas, the local atlas, or the scratch alone
+	const bool viaCasc = (Config->TerrainShadowing == 3) && ptCasc && psCasc && cascSize > 0;
+	int nMax = max(1, min(6, Config->LocalLightShadowMaps));
+	if (nMax > 1 && !viaCasc && !psLclAtl) nMax = 1;
+	const int pointMode = max(0, min(2, Config->LocalLightShadowPoint));	// 0 off, 1 aimed map, 2 cube where five cells are free
+
+	// THE NIGHT GATE IS THE TERRAIN BORROW'S ALONE (2026-09-05, his Brighton Beach day test):
+	// the terrain in modes 0-2 borrows the sun map's sampler slot for the local maps (the
+	// 16-sampler ceiling), so a beam-lit tile yields its SUN shadow - invisible at night, a
+	// bite out of the vessel's shadow by day. The maps BUILD whenever a qualifying light
+	// exists; vessels receive day and night; in mode 3 the atlas borrows nothing.
+	lsTerrainOK = true;
+	D3DXVECTOR3 pcen(0, 0, 0);
+	bool hasPlanet = false;
+	if (this->Camera.vProxy) {
+		pcen = this->Camera.vProxy->GetBoundingSpherePosDX();
+		hasPlanet = true;
+		D3DXVECTOR3 up = -pcen;
 		D3DXVec3Normalize(&up, &up);
 		D3DXVECTOR3 sd = sunLight.Dir;
-		if (D3DXVec3Dot(&up, &sd) < -0.045f) lsmap.terrainOK = false;
+		if (D3DXVec3Dot(&up, &sd) < -0.045f) lsTerrainOK = false;
 	}
 
-	// -----------------------------------------------------------------------------
-	// Pick the strongest shadow-casting SPOT. Score favours bright, long-range
-	// lights near the camera; the 2 km gate keeps the map from being spent on a
-	// base light too far away to resolve a texel.
-	//
-	int best = -1;
-	float bestScore = 0.0f;
+	// the owners of a map's member lights never cast into it (emitters are authored inside hulls)
+	struct MAPB { int lead, n; int mem[MAX_SCENE_LIGHTS]; D3DXVECTOR3 P, D; float range, halfCone; bool pt; int faces; };
+	// ORO 2026-09-13: the ownership test is now TWO tests. ownsLight() is the pure one -
+	// who emits this map's lights - and isOwner() is the EXCLUSION built on it, which the
+	// self-shadow flag switches off. The exemptions below need to know the owner even when
+	// the flag has stopped excluding it, which one combined predicate cannot express.
+	auto ownsLight = [&](const MAPB& B, const vObject* vo) -> bool {
+		for (int m = 0; m < B.n; m++) if (vo == LightOwners[B.mem[m]]) return true;
+		return false;
+	};
+	auto isOwner = [&](const MAPB& B, const vObject* vo) -> bool {
+		if (Config->LocalLightSelfShadow) return false;
+		return ownsLight(B, vo);
+	};
+	// where the visible casters are, seen from P (vessels here, base structures via vPlanet) -
+	// the aim of a point light's map; also its viability: no caster, no cell
+	auto aimCasters = [&](const MAPB& B, const D3DXVECTOR3& P, float range, D3DXVECTOR3& D) -> int {
+		D3DXVECTOR3 sum(0, 0, 0); float weight = 0.0f; int n = 0;
+		for (VOBJREC* pv = vobjFirst; pv; pv = pv->next) {
+			if (pv->type != OBJTP_VESSEL) continue;
+			vVessel* vV = (vVessel*)pv->vobj;
+			if (!vV->IsActive() || isOwner(B, pv->vobj)) continue;
+			D3DXVECTOR3 bsp = vV->GetBoundingSpherePosDX();
+			const float bsr = vV->GetBoundingSphereRadius();
+			D3DXVECTOR3 rel = bsp - P;
+			const float d = D3DXVec3Length(&rel);
+			// ORO 2026-09-13: a sphere that CONTAINS the light serves no map (the SSV mast rule,
+			// 2026-09-09) - EXCEPT when LocalLightSelfShadow asked for exactly that hull. Without
+			// this the flag admits the owner above and the containment test rejects it here, so an
+			// emitter authored inside its own hull finds NO caster, opens no cell, and the flag is
+			// silently inert. A light at the sphere's own centre still cannot be aimed, so it stays
+			// out: there is no direction to build a map around.
+			const bool self = Config->LocalLightSelfShadow && ownsLight(B, pv->vobj);
+			if (d > range + bsr) continue;
+			if (d <= bsr + 0.01f && !(self && d > 0.05f)) continue;
+			if (!IsVisibleInCamera(&bsp, bsr)) continue;
+			// the cap is a no-op wherever the sphere does NOT contain the light (bsr/d < 1, i.e.
+			// every case that existed before today) and stops a contained hull - where bsr/d can
+			// be large - from swamping every other caster's contribution to the aim.
+			const float w = min(1.0f, (bsr * bsr) / (d * d));
+			sum += rel * (w / d); weight += w; n++;
+		}
+		if (this->Camera.vProxy) n += this->Camera.vProxy->AimBaseLocalShadowCasters(P, range, sum, weight);
+		if (n == 0 || weight <= 0.0f) return 0;
+		D3DXVec3Normalize(&D, &sum);
+		return n;
+	};
 
+	// -----------------------------------------------------------------------------
+	// Rank the candidates: SPOTS FIRST, then (with the Launchpad row on) POINTS, each class by
+	// score - bright, long-range lights near the camera; the 2 km gate keeps a map from being
+	// spent on a base light too far away to resolve a texel. STICKY (step 2): a light that led a
+	// map last frame - matched by EMITTER, since scene indices reshuffle every frame - ranks at
+	// 1.5x its score, so a challenger must out-score an incumbent by half again to take its cell.
+	struct CAND { int i; float score, rank; bool pt; };
+	CAND cand[MAX_SCENE_LIGHTS];
+	int nc = 0;
 	for (DWORD i = 0; i < nLights; i++)
 	{
-		if (Lights[i].Type != 1) continue;							// spots only
-		float rng = Lights[i].Param[D3D9LRange];
+		const bool pt = (Lights[i].Type != 1);
+		if (pt && pointMode == 0) continue;
+		const float rng = Lights[i].GetRange();
 		if (rng < 5.0f) continue;									// a glow, not a beam
-		float d2 = D3DXVec3Dot(&Lights[i].Position, &Lights[i].Position);
+		const float d2 = Lights[i].Dst2;
 		if (d2 > 4.0e6f) continue;
-		float lum = max(max(Lights[i].Diffuse.r, Lights[i].Diffuse.g), Lights[i].Diffuse.b);
+		const float lum = max(max(Lights[i].Diffuse.r, Lights[i].Diffuse.g), Lights[i].Diffuse.b);
 		if (lum <= 0.0f) continue;
-		float score = lum * rng * rng / (100.0f + d2);
-		if (score > bestScore) { bestScore = score; best = (int)i; }
+		if (!pt && Lights[i].GetCosPhi() > 0.9999f) continue;		// degenerate cone
+		CAND c; c.i = (int)i; c.pt = pt;
+		c.score = lum * min(rng, ORO_LCL_PT_RANGE) * min(rng, ORO_LCL_PT_RANGE) / (100.0f + d2);
+		c.rank = c.score;
+		for (int k = 0; k < nLclPrev; k++) if (lclPrevLe[k] && Lights[i].GetEmitter() == lclPrevLe[k]) { c.rank = c.score * 1.5f; break; }
+		int j = nc++;
+		while (j > 0 && (cand[j - 1].pt > c.pt || (cand[j - 1].pt == c.pt && cand[j - 1].rank < c.rank))) { cand[j] = cand[j - 1]; j--; }
+		cand[j] = c;
 	}
-
-	if (best < 0) return;
-
-	const D3D9Light& L = Lights[best];
+	nLclPrev = 0;
+	if (nc == 0) return;
 
 	// -----------------------------------------------------------------------------
-	// Light view-projection: perspective from the emitter along its axis. FOV = the
-	// spot's PENUMBRA cone (Param[D3D9LPhi] = cos(P/2)) plus a hair of margin, far
-	// plane = the light's range. The near plane is pushed out a little so skin
-	// centimetres from an emitter authored just inside a fixture cannot fill the map.
-	//
-	float cosPhi = L.Param[D3D9LPhi];
-	if (cosPhi > 0.9999f) return;			// degenerate cone
-
-	float fov = 2.0f * acosf(min(1.0f, max(-1.0f, cosPhi))) * 1.05f;
-	fov = min(fov, 2.9f);					// keep the projection sane near 180 deg
-
-	D3DXVECTOR3 P = L.Position;
-	D3DXVECTOR3 D = L.Direction;
-	D3DXVec3Normalize(&D, &D);
-
-	D3DXVECTOR3 up = (fabs(D.y) < 0.9f) ? D3DXVECTOR3(0, 1, 0) : D3DXVECTOR3(1, 0, 0);
-	D3DXVECTOR3 tgt = P + D;
-
-	float zfar = L.Param[D3D9LRange];
-	float znear = max(0.75f, zfar * 0.004f);
-
-	D3DXMATRIX mV, mP;
-	D3DXMatrixLookAtRH(&mV, &P, &tgt, &up);
-	D3DXMatrixPerspectiveFovRH(&mP, fov, 1.0f, znear, zfar);
-	D3DXMatrixMultiply(&lsmap.mViewProj, &mV, &mP);
-
-	lsmap.pos = P;
-	lsmap.range = zfar;
-	// The receivers' normal-offset scale: how many metres one map texel spans per
-	// metre of distance from the light. A near-horizontal beam grazing flat ground
-	// makes every depth test marginal at once (the whole lit pool blinked while
-	// the DG pitched on its gear - flown, not theorised); offsetting the receiver
-	// point along its surface normal by ~2 texels clears it geometrically.
-	lsmap.texel = 2.0f * tanf(fov * 0.5f) / (float)lsmap.size;
-	// ... and the metres-to-depth-units factor for the receivers' texel-footprint
-	// bias: at grazing incidence one texel's ground footprint spans metres of ray
-	// depth, and the compare must clear exactly that span or flat ground strobes
-	// against itself (his runway test) - while a REAL caster's separation dwarfs it.
-	lsmap.kdepth = znear * zfar / (zfar - znear);
-
-	// -----------------------------------------------------------------------------
-	// Render the casters. Vessels go through vVessel::Render under
-	// RENDERPASS_SHADOWMAP so animation matrices apply - that path reads
-	// scn->GetSMapData()->mViewProj (VVessel.cpp), so the SUN's smap matrices are
-	// swapped out and restored around the pass (the patch-(s) push/restore law).
-	// The emitter's OWN vessel is EXCLUDED: emitter positions are routinely
-	// authored inside the hull (the DG dock light sits in the nose), and an honest
-	// self-shadow from in there blacks the whole beam out. Own-hull shadows are a
-	// later question, not a v1 regression - stock casts nothing at all.
-	//
-	SHADOWMAPPARAM save = smap;
-	smap.mViewProj = lsmap.mViewProj;
-
-	gc->PushRenderTarget(psLclShm, psLclShmDS, RENDERPASS_SHADOWMAP);
-	HR(pDevice->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0, 1.0f, 0L));
-
-	BeginPass(RENDERPASS_SHADOWMAP);
-
-	const vObject* pOwner = LightOwners[best];
-
-	for (VOBJREC* pv = vobjFirst; pv; pv = pv->next) {
-		if (pv->type != OBJTP_VESSEL) continue;
-		vVessel* vV = (vVessel*)pv->vobj;
-		if (!vV->IsActive()) continue;
-		if (pv->vobj == pOwner) continue;
-		D3DXVECTOR3 bs = vV->GetBoundingSpherePosDX();
-		float bsr = vV->GetBoundingSphereRadius();
-		D3DXVECTOR3 rel = bs - P;
-		if (D3DXVec3Length(&rel) > zfar + bsr) continue;
-		vV->Render(pDevice, false);
-	}
-
-	// Base structures (the above-shadow set) join as casters - the flagship case:
-	// the beam carved by a hangar. opt 0 routes the same meshes into the
-	// SHADER_SHADOWMAP technique instead of patch (z2)'s NORMAL_DEPTH.
-	if (Camera.vProxy) Camera.vProxy->RenderBaseDepth(&lsmap.mViewProj, 0);
-
-	// ORO patch (z3) round 2c: TERRAIN joins the casters - the beam dies at a
-	// ridge instead of painting the valley behind it. The tiles are the ones the
-	// PREVIOUS frame's terrain render registered within the light's range (one
-	// frame stale, and terrain does not move). Cull NONE: a heightfield has no
-	// meaningful backface for a depth map, and explicit is robust against
-	// whatever the mesh pass left behind.
-	if (pTileShd && tiles.size()) {
-		pTileShd->ClearTextures();
-		pTileShd->Setup(pPatchVertexDecl, true, 0);
-		pTileShd->SetVSConstants("mTileShdVP", &lsmap.mViewProj, sizeof(D3DXMATRIX));
-		pDevice->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
-		for (auto& t : tiles) {
-			// A stale entry's mW is camera-relative to where the camera WAS at its
-			// registration - re-anchor by the camera's translation since (the world
-			// orientation never changes, only the origin rides the camera).
-			// ORO patch (ab) round 3: RELATIVE TO THE PLANET - see the depth pass and
-			// LCLTILECASTER. The global-frame version put every stale tile ~150 m off on
-			// the frames the sim stepped (the beam's shimmer under manoeuvres, most likely).
-			D3DXMATRIX mW;
-			OroTileFromPlanet(t, Camera.pos, mW);   // ORO patch (ab) round 4: from the planet's current frame
-			// ORO patch (ab): registration is no longer range-gated (the depth pass
-			// wants every nearby tile), so the light's range filter lives here now.
-			{
-				const D3DXVECTOR3 sh(mW._41 - t.mW._41, mW._42 - t.mW._42, mW._43 - t.mW._43);   // ORO patch (ab) round 4: how far the rebuild moved the origin
-				D3DXVECTOR3 b(t.bs.x + sh.x, t.bs.y + sh.y, t.bs.z + sh.z);
-				D3DXVECTOR3 r = b - lsmap.pos;
-				if (D3DXVec3Length(&r) > lsmap.range + t.bsRad) continue;
-			}
-			pTileShd->SetVSConstants("mTileShdW", (void*)&mW, sizeof(D3DXMATRIX));
-			pDevice->SetStreamSource(0, t.pVB, 0, sizeof(VERTEX_2TEX));
-			pDevice->SetIndices(t.pIB);
-			pDevice->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, t.nv, 0, t.nf);
+	// CLUSTER, then assign cells. Walking the ranking, a light JOINS an existing map of its own
+	// kind when it stands within 3 m of that map's leader (and, for spots, aims within 15 degrees
+	// of it): the lamps of one bank share one map from the centroid, the union of the cones. Else
+	// it OPENS a map while cells remain - one cell, or five for the first point light when the
+	// cube mode is on and five are free. A point light with no visible caster in reach opens
+	// nothing. The rest get none this frame and light without shadows.
+	MAPB mb[6];
+	int nm = 0, cellsUsed = 0;
+	bool cubeDone = false;
+	for (int c = 0; c < nc; c++) {
+		const D3D9Light& L = Lights[cand[c].i];
+		D3DXVECTOR3 Lp = L.Pos3(), Ld = L.Dir3(); D3DXVec3Normalize(&Ld, &Ld);
+		int join = -1;
+		for (int k = 0; k < nm && join < 0; k++) {
+			if (mb[k].pt != cand[c].pt) continue;
+			const D3D9Light& Lk = Lights[mb[k].lead];
+			D3DXVECTOR3 dp = Lp - Lk.Pos3(), kd = Lk.Dir3(); D3DXVec3Normalize(&kd, &kd);
+			if (D3DXVec3Length(&dp) < 3.0f && (cand[c].pt || D3DXVec3Dot(&Ld, &kd) > 0.9659f)) join = k;	// cos 15 deg
 		}
-		pDevice->SetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);
+		if (join >= 0) { mb[join].mem[mb[join].n++] = cand[c].i; continue; }
+		if (cellsUsed >= nMax) continue;
+		MAPB& B = mb[nm];
+		B.lead = cand[c].i; B.n = 1; B.mem[0] = cand[c].i; B.pt = cand[c].pt; B.faces = 1;
+		if (B.pt) {
+			D3DXVECTOR3 aim;
+			if (aimCasters(B, Lp, min(L.GetRange(), ORO_LCL_PT_RANGE), aim) == 0) continue;	// nothing to cast: no cell
+			if (pointMode == 2 && !cubeDone && nMax - cellsUsed >= 5) { B.faces = 5; cubeDone = true; }
+		}
+		nm++; cellsUsed += B.faces;
 	}
 
-	PopPass();
-	gc->PopRenderTargets();
+	// each map's frame: the centroid, the longest reach; spots take the mean axis and the cone
+	// covering every member's, an aimed point map the casters' direction under its ceiling
+	for (int k = 0; k < nm; k++) {
+		MAPB& B = mb[k];
+		D3DXVECTOR3 P(0, 0, 0), D(0, 0, 0);
+		float range = 0.0f;
+		for (int m = 0; m < B.n; m++) {
+			const D3D9Light& L = Lights[B.mem[m]];
+			P += L.Pos3();
+			if (!B.pt) { D3DXVECTOR3 d = L.Dir3(); D3DXVec3Normalize(&d, &d); D += d; }
+			range = max(range, L.GetRange());
+		}
+		P /= (float)B.n;
+		B.P = P;
+		if (B.pt) {
+			B.range = min(range, ORO_LCL_PT_RANGE);
+			B.halfCone = ORO_LCL_PT_HALF;
+			if (aimCasters(B, P, B.range, D) == 0) D = D3DXVECTOR3(0, -1, 0);	// (the leader had casters; a cluster centroid rarely loses them)
+			B.D = D;
+			continue;
+		}
+		D3DXVec3Normalize(&D, &D);
+		float half = 0.0f;
+		for (int m = 0; m < B.n; m++) {
+			const D3D9Light& L = Lights[B.mem[m]];
+			D3DXVECTOR3 d = L.Dir3(); D3DXVec3Normalize(&d, &d);
+			const float off = acosf(min(1.0f, max(-1.0f, D3DXVec3Dot(&d, &D))));
+			const float hc  = acosf(min(1.0f, max(-1.0f, L.GetCosPhi()))) * 1.05f;	// the PENUMBRA cone plus a hair of margin
+			half = max(half, off + hc);
+		}
+		B.D = D; B.range = range;
+		B.halfCone = min(half, 1.45f);					// keep the projection sane near 180 deg
+	}
 
+	// -----------------------------------------------------------------------------
+	// Render the maps, one cell at a time, through the scratch target. Vessels go through
+	// vVessel::Render under RENDERPASS_SHADOWMAP so animation matrices apply - that path reads
+	// scn->GetSMapData()->mViewProj (VVessel.cpp), so the SUN's smap matrices are swapped out
+	// and restored around the passes (the patch-(s) push/restore law). The members' OWN vessels
+	// are EXCLUDED (emitters are authored inside hulls; LocalLightSelfShadow admits them), base
+	// structures come through RenderBaseDepth opt 0, terrain through the tile registry.
+	SHADOWMAPPARAM save = smap;
+	int dbgCast[6] = { 0 };
+	auto renderCell = [&](const MAPB& B, const D3DXVECTOR3& P, const D3DXVECTOR3& D, float fov, float zfar, int cell, int kind) {
+		const float znear = ORO_LCL_NF * zfar;
+		const D3DXVECTOR3 up = (fabs(D.y) < 0.9f) ? D3DXVECTOR3(0, 1, 0) : D3DXVECTOR3(1, 0, 0);	// the receivers rebuild this basis - keep the rule in step with the shaders
+		const D3DXVECTOR3 tgt = P + D;
+		D3DXMATRIX mV, mP;
+		D3DXMatrixLookAtRH(&mV, &P, &tgt, &up);
+		D3DXMatrixPerspectiveFovRH(&mP, fov, 1.0f, znear, zfar);
+		LOCALSHADOWPARAM& M = lsmaps[cell];
+		D3DXMatrixMultiply(&M.mViewProj, &mV, &mP);
+		M.pos = P; M.dir = D; M.range = zfar; M.tanHalf = tanf(fov * 0.5f);
+		M.idx = B.lead; M.cell = cell; M.le = Lights[B.lead].GetEmitter(); M.kind = kind;
+
+		smap.mViewProj = M.mViewProj;
+		gc->PushRenderTarget(psLclShm, psLclShmDS, RENDERPASS_SHADOWMAP);
+		HR(pDevice->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0, 1.0f, 0L));
+		BeginPass(RENDERPASS_SHADOWMAP);
+		for (VOBJREC* pv = vobjFirst; pv; pv = pv->next) {
+			if (pv->type != OBJTP_VESSEL) continue;
+			vVessel* vV = (vVessel*)pv->vobj;
+			if (!vV->IsActive() || isOwner(B, pv->vobj)) continue;
+			D3DXVECTOR3 bs = vV->GetBoundingSpherePosDX();
+			const float bsr = vV->GetBoundingSphereRadius();
+			D3DXVECTOR3 rel = bs - P;
+			if (D3DXVec3Length(&rel) > zfar + bsr) continue;
+			vV->Render(pDevice, false);
+		}
+		// Base structures (the above-shadow set) join as casters - the flagship case: the beam
+		// carved by a hangar. opt 0 routes the same meshes into the SHADER_SHADOWMAP technique.
+		if (this->Camera.vProxy) this->Camera.vProxy->RenderBaseDepth(&M.mViewProj, 0);
+		// ORO patch (z3) round 2c: TERRAIN joins the casters - the beam dies at a ridge. The tiles
+		// are the ones the PREVIOUS frame's terrain render registered, stored in their planet's
+		// frame ((ab) round 4) and rebuilt from the planet's current rotation + position.
+		if (pTileShd && tiles.size()) {
+			pTileShd->ClearTextures();
+			pTileShd->Setup(pPatchVertexDecl, true, 0);
+			pTileShd->SetVSConstants("mTileShdVP", &M.mViewProj, sizeof(D3DXMATRIX));
+			pDevice->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+			for (auto& t : tiles) {
+				D3DXMATRIX mW;
+				OroTileFromPlanet(t, this->Camera.pos, mW);
+				{
+					const D3DXVECTOR3 sh(mW._41 - t.mW._41, mW._42 - t.mW._42, mW._43 - t.mW._43);
+					D3DXVECTOR3 b(t.bs.x + sh.x, t.bs.y + sh.y, t.bs.z + sh.z);
+					D3DXVECTOR3 r = b - P;
+					if (D3DXVec3Length(&r) > zfar + t.bsRad) continue;
+				}
+				pTileShd->SetVSConstants("mTileShdW", (void*)&mW, sizeof(D3DXMATRIX));
+				pDevice->SetStreamSource(0, t.pVB, 0, sizeof(VERTEX_2TEX));
+				pDevice->SetIndices(t.pIB);
+				pDevice->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, t.nv, 0, t.nf);
+			}
+			pDevice->SetRenderState(D3DRS_CULLMODE, D3DCULL_CCW);
+		}
+		PopPass();
+		gc->PopRenderTargets();
+
+		// into its cell - point-sampled: a depth map must not be averaged
+		if (viaCasc) {
+			const int q = cascSize / 2;
+			RECT dst = { cell * q, 3 * q, (cell + 1) * q, 4 * q };
+			if (SUCCEEDED(pDevice->StretchRect(psLclShm, NULL, psCasc, &dst, D3DTEXF_POINT))) cascLclLive = true;
+		}
+		else if (nMax > 1) {
+			const int c = lclCellPx, cx = cell % lclAtlCols, cy = cell / lclAtlCols;
+			RECT dst = { cx * c, cy * c, (cx + 1) * c, (cy + 1) * c };
+			pDevice->StretchRect(psLclShm, NULL, psLclAtl, &dst, D3DTEXF_POINT);
+		}
+	};
+
+	int cc = 0;
+	for (int k = 0; k < nm; k++) {
+		MAPB& B = mb[k];
+		const D3DXVECTOR3 P = B.P;
+		if (B.faces == 5) {
+			// THE CUBE: five faces on the local vertical - the receivers rebuild X and Z from
+			// face 0's axis (-up) with the same rule, so only the up vector must agree
+			D3DXVECTOR3 up = hasPlanet ? (P - pcen) : D3DXVECTOR3(0, 1, 0);
+			D3DXVec3Normalize(&up, &up);
+			const D3DXVECTOR3 aux = (fabs(up.y) < 0.9f) ? D3DXVECTOR3(0, 1, 0) : D3DXVECTOR3(1, 0, 0);
+			D3DXVECTOR3 X, Z;
+			D3DXVec3Cross(&X, &up, &aux); D3DXVec3Normalize(&X, &X);
+			D3DXVec3Cross(&Z, &X, &up);
+			const D3DXVECTOR3 axes[5] = { -up, X, -X, Z, -Z };
+			const float fov = 2.0f * atanf(ORO_LCL_CUBE_TAN);
+			for (int fc = 0; fc < 5; fc++) renderCell(B, P, axes[fc], fov, B.range, cc + fc, 2);
+			for (int m = 0; m < B.n; m++) Lights[B.mem[m]].Diffuse.a = 100.0f + (float)cc;
+			dbgCast[k] = 5;
+			lclPrevLe[nLclPrev++] = lsmaps[cc].le;
+			cc += 5;
+			continue;
+		}
+
+		float fov = 2.0f * B.halfCone;
+		const float zfar = B.range;						// the light's reach - a caster farther than the fit still throws
+		// THE CASTER FIT (steps 2 and 2b): the cone is the ceiling; the map narrows to the angular
+		// extent of the visible vessel and base-structure casters inside it, never below HALF the
+		// cone (terrain tiles are not in the fit). A sphere that CONTAINS the light is skipped.
+		{
+			const float halfCone = fov * 0.5f;
+			float halfFit = 0.0f, farFit = 0.0f;
+			int nCast = 0;
+			for (VOBJREC* pv = vobjFirst; pv; pv = pv->next) {
+				if (pv->type != OBJTP_VESSEL) continue;
+				vVessel* vV = (vVessel*)pv->vobj;
+				if (!vV->IsActive() || isOwner(B, pv->vobj)) continue;
+				D3DXVECTOR3 bsp = vV->GetBoundingSpherePosDX();
+				const float bsr = vV->GetBoundingSphereRadius();
+				D3DXVECTOR3 rel = bsp - P;
+				if (D3DXVec3Length(&rel) > zfar + bsr) continue;
+				if (!IsVisibleInCamera(&bsp, bsr)) continue;
+				// ORO 2026-09-13: the aim's exemption, applied to the FIT as well. A spot already got
+				// its map (the fit only narrows the cone, it is not a viability test), but without this
+				// the cone narrows onto whatever OTHER caster is in the beam and the hull we were asked
+				// to shadow is fitted straight out of the map. A contained sphere takes the full cone.
+				const bool self = Config->LocalLightSelfShadow && ownsLight(B, pv->vobj);
+				if (OroFitCasterSphere(rel, bsr, B.D, halfCone, halfFit, farFit, self)) nCast++;
+			}
+			if (this->Camera.vProxy) nCast += this->Camera.vProxy->FitBaseLocalShadowCasters(P, B.D, zfar, halfCone, halfFit, farFit);
+			if (nCast > 0) fov = min(fov, 2.0f * max(halfFit * 1.08f + 0.02f, halfCone * 0.5f));	// margin, then the floor
+			dbgCast[k] = nCast;
+		}
+		renderCell(B, P, B.D, fov, zfar, cc, B.pt ? 1 : 0);
+		for (int m = 0; m < B.n; m++) Lights[B.mem[m]].Diffuse.a = (float)(cc + 1);
+		lclPrevLe[nLclPrev++] = lsmaps[cc].le;
+		cc++;
+	}
 	smap = save;
-	lsmap.idx = best;
+	nLclMaps = cc;
+
+	// INSTRUMENT (ShadowDebug >= 1): once a second, the maps this frame - the (ab) rule, from day one
+	if (Config->ShadowDebug >= 1) {
+		static DWORD s_last = 0;
+		if (dwFrameId - s_last > 60) {
+			s_last = dwFrameId;
+			char tx[640]; int n = 0;
+			int cell = 0;
+			for (int k = 0; k < nm; k++) {
+				const float tanH = lsmaps[cell].tanHalf;
+				n += sprintf_s(tx + n, sizeof(tx) - n, " [%d: %s light %d x%d fov %.0f rng %.0f cast %d]", cell,
+							   mb[k].faces == 5 ? "CUBE" : (mb[k].pt ? "aimed" : "spot"), mb[k].lead, mb[k].n,
+							   2.0 * atan((double)tanH) * 180.0 / 3.14159265, lsmaps[cell].range, dbgCast[k]);
+				cell += mb[k].faces;
+			}
+			oapiWriteLogV("ORO lcl dbg: %d/%d cells, %d candidates, %s%s", cc, nMax, nc, viaCasc ? "cascade atlas" : (nMax > 1 ? "local atlas" : "scratch"), tx);
+		}
+	}
+}
+
+// the receivers' view of the maps - see Scene.h
+void Scene::GetLocalShadowConstants(D3DXVECTOR4* P, D3DXVECTOR4* Dd, D3DXVECTOR4* A, D3DXVECTOR4* B, LPDIRECT3DTEXTURE9* pTex, bool bVessel) const
+{
+	for (int k = 0; k < 6; k++) { P[k] = D3DXVECTOR4(0, 0, 0, 0); Dd[k] = D3DXVECTOR4(0, 0, 1, 1); }
+	*A = D3DXVECTOR4(0, 1, 0, 1);
+	*B = D3DXVECTOR4(1, 1, 0, 0);
+	*pTex = NULL;
+	if (nLclMaps <= 0 || !ptLclShm) return;
+
+	const bool viaCasc = (Config->TerrainShadowing == 3) && ptCasc && cascSize > 0;
+	// one live map: the mesh family reads the scratch at full size (its cell copy is half);
+	// so does the terrain's borrow - but not the terrain in mode 3, whose sampler IS the atlas
+	const bool scratch = (nLclMaps == 1) && (bVessel || !viaCasc);
+	int cols, cellPx, rows;
+	float rowY0;
+	LPDIRECT3DTEXTURE9 tex;
+	if (scratch)      { cols = 1; rows = 1; cellPx = lclScratchSize; rowY0 = 0.0f;  tex = ptLclShm; }
+	else if (viaCasc) { cols = 6; rows = 4; cellPx = cascSize / 2;   rowY0 = 0.75f; tex = ptCasc; }	// the atlas is 6 x 4 half-cells; the spare row is the fourth
+	else              { cols = lclAtlCols; rows = lclAtlRows; cellPx = lclCellPx; rowY0 = 0.0f; tex = ptLclAtl; }
+	if (!tex || cellPx <= 0) return;
+	for (int k = 0; k < nLclMaps; k++) {
+		const float cell = scratch ? 0.0f : (float)lsmaps[k].cell;
+		P[k]  = D3DXVECTOR4(lsmaps[k].pos.x, lsmaps[k].pos.y, lsmaps[k].pos.z, cell * 10.0f + min(9.0f, lsmaps[k].tanHalf));
+		Dd[k] = D3DXVECTOR4(lsmaps[k].dir.x, lsmaps[k].dir.y, lsmaps[k].dir.z, lsmaps[k].range);
+	}
+	*A = D3DXVECTOR4((float)nLclMaps, (float)cols, rowY0, (float)cellPx);
+	*B = D3DXVECTOR4(1.0f / (float)cols, 1.0f / (float)rows, 1.0f / (float)(cols * cellPx), 1.0f / (float)(rows * cellPx));
+	*pTex = tex;
+}
+
+void Scene::PushLocalShadowConstants()
+{
+	D3DXVECTOR4 P[6], Dd[6], A, B;
+	LPDIRECT3DTEXTURE9 tex = NULL;
+	GetLocalShadowConstants(P, Dd, &A, &B, &tex, true);
+	const int n = Config->LocalLightShadows ? max(1, min(6, Config->LocalLightShadowMaps)) : 1;	// the effect's array size (the LCLMAPS macro)
+	if (D3D9Effect::eLclShdP)   D3D9Effect::FX->SetVectorArray(D3D9Effect::eLclShdP, P, n);
+	if (D3D9Effect::eLclShdD)   D3D9Effect::FX->SetVectorArray(D3D9Effect::eLclShdD, Dd, n);
+	if (D3D9Effect::eLclShd)    D3D9Effect::FX->SetVector(D3D9Effect::eLclShd, &A);
+	if (D3D9Effect::eLclAtl)    D3D9Effect::FX->SetVector(D3D9Effect::eLclAtl, &B);
+	if (D3D9Effect::eLclShmTex) D3D9Effect::FX->SetTexture(D3D9Effect::eLclShmTex, tex);
 }
 
 
@@ -5556,6 +5915,25 @@ void Scene::RenderGlares()
 				glare *= OroSunTerrainVis(Camera.pos, Camera.hObj_proxy, usun);
 				// ORO patch (aa): and the sun disc dims through the fog above the camera.
 				glare *= g_oroFogSunCam;
+				// ORO patch (aj) 2026-09-12: AND THE SUN DIMS THROUGH THE RINGS. His flight-2
+				// report - "the sun sprite doesn't change in strength when seen through the
+				// rings". It is the same optical depth that already darkens the ring's shadow
+				// band on the planet and shades a ship standing in it, applied to the one
+				// light path still open: the line of sight from the CAMERA to the sun. Cross
+				// the B ring and the sun nearly goes out; cross the Cassini Division and it
+				// barely dips - so tracking along the rings dims and brightens it, which is
+				// the whole of what he asked for, and the Ring density trim scales it because
+				// the trim is already inside tau.
+				// vPlanet::OroRingTransmission is the shared implementation (the per-object
+				// sun calls the same one); it returns exactly 1 for a planet with no rings or
+				// no ORO look, so this loop is free in every system that has neither. The ray
+				// it marches is the planet's own toSun rather than the camera's usun - the two
+				// differ by well under an arcsecond at any distance the sun is drawn from.
+				for (DWORD ip = 0; ip < nplanets; ip++) {
+					vObject* vo = plist[ip].vo;
+					if (!vo || vo->Type() != OBJTP_PLANET) continue;
+					glare *= ((vPlanet*)vo)->OroRingTransmission(Camera.pos - vo->GlobalPos());
+				}
 				FVECTOR4 clr = FVECTOR4(1, 1, 1, 1);
 
 				vPlanet* vp = GetCameraNearVisual();
@@ -5593,7 +5971,7 @@ void Scene::RenderGlares()
 			for (int i = 0; i < nLights; ++i) {
 				int GPUId = Lights[i].GPUId;
 				if (GPUId >= 0) {
-					if (WorldToScreenSpace2(_V(Lights[i].Position), &pt)) {
+					if (WorldToScreenSpace2(_V(Lights[i].Pos3()), &pt)) {	// ORO patch (ah)
 						float size = 40.0f;
 						Const.GPUId = (float(GPUId) + 0.5f) / desc.Width;
 						Const.Pos = FVECTOR4(pt.x, pt.y, size, size);

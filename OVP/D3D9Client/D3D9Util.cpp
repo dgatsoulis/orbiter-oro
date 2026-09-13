@@ -1353,6 +1353,7 @@ bool CreateVolumeTexture(LPDIRECT3DDEVICE9 pDevice, int count, LPDIRECT3DTEXTURE
 // Light Emitter ============================================================================
 //
 D3D9Light::D3D9Light(const LightEmitter *le, const class vObject *vo) :
+	Type(0), Dst2(0.0f),			// ORO patch (ah)
 	cosp(0), tanp(0), cosu(0),
 	range(0), range2(0),
 	intensity(-1.0)
@@ -1363,6 +1364,7 @@ D3D9Light::D3D9Light(const LightEmitter *le, const class vObject *vo) :
 // ============================================================================
 //
 D3D9Light::D3D9Light() :
+	Type(0), Dst2(0.0f),			// ORO patch (ah)
 	cosp(0), tanp(0), cosu(0),
 	range(0), range2(0),
 	intensity(-1.0),
@@ -1393,7 +1395,7 @@ float D3D9Light::GetIlluminance(D3DXVECTOR3 &_pos, float r) const
 {
 	if (intensity < 0) return -1.0f;
 
-	D3DXVECTOR3 pos = _pos - Position;
+	D3DXVECTOR3 pos = _pos - Pos3();		// ORO patch (ah): Position is float4 now
 
 	float d = D3DXVec3Length(&pos);
 	float d2 = d*d;
@@ -1402,7 +1404,8 @@ float D3D9Light::GetIlluminance(D3DXVECTOR3 &_pos, float r) const
 	if (d > (r + range)) return -1.0f; // Light can't reach the sphere
 
 	if ((Type == 1) && (cosp>0.1)) {
-		float x = D3DXVec3Dot(&pos, &Direction);
+		D3DXVECTOR3 dir3 = Dir3();
+		float x = D3DXVec3Dot(&pos, &dir3);
 		if (x < -r) return -1.0f;	// The sphere is a way behind the spotlight
 		if ((sqrt(d2 - x*x) - x*tanp) * cosp > r) return -1.0f; // Light cone doesn't intersect the sphere
 	}
@@ -1426,13 +1429,16 @@ void D3D9Light::UpdateLight(const LightEmitter *_le, const class vObject *vo)
 
 	// -----------------------------------------------------------------------------
 
-	D3DXVec3TransformCoord(&Position, ptr(D3DXVEC(le->GetPosition())), vo->MWorld());
-	Dst2 = D3DXVec3Dot(&Position, &Position);
+	// ORO patch (ah): the GPU struct is four float4; xyz here, the spot's cos(phi) in .w below
+	D3DXVECTOR3 P3;
+	D3DXVec3TransformCoord(&P3, ptr(D3DXVEC(le->GetPosition())), vo->MWorld());
+	Position = D3DXVECTOR4(P3, 1.0f);
+	Dst2 = D3DXVec3Dot(&P3, &P3);
 
 	// -----------------------------------------------------------------------------
 
 	const double *att = ((PointLight*)le)->GetAttenuation();
-	Attenuation = D3DXVECTOR3((float)att[0], (float)att[1], (float)att[2]);
+	Attenuation = D3DXVECTOR4((float)att[0], (float)att[1], (float)att[2], 0.0f);	// ORO patch (ah): w = type, set below
 
 	// -----------------------------------------------------------------------------
 
@@ -1462,9 +1468,9 @@ void D3D9Light::UpdateLight(const LightEmitter *_le, const class vObject *vo)
 			cosp = cos(P * 0.5f);
 			cosu = cos(U * 0.5f);
 			tanp = tan(P * 0.5f);
-			Param[D3D9LFalloff] = 1.0f;
-			Param[D3D9LPhi] = cosp;
-			Param[D3D9LTheta] = 1.0f / (cosu - cosp);
+			Position.w = cosp;						// ORO patch (ah): was Param[D3D9LPhi]
+			Direction.w = 1.0f / (cosu - cosp);		// ORO patch (ah): was Param[D3D9LTheta]
+			Attenuation.w = 1.0f;					// ORO patch (ah): the spot flag the shader tests
 		} break;
 
 		default:
@@ -1478,7 +1484,7 @@ void D3D9Light::UpdateLight(const LightEmitter *_le, const class vObject *vo)
 	Diffuse.r = (col_d.r*intensity);
 	Diffuse.g = (col_d.g*intensity);
 	Diffuse.b = (col_d.b*intensity);
-	Diffuse.a = (col_d.a*intensity);
+	Diffuse.a = 0.0f;	// ORO patch (ah) step 4: no shader ever read the alpha; it carries the light's spot shadow map (cell + 1, 0 = none), assigned by Scene each frame
 
 
 	float c = float(att[0]);
@@ -1493,14 +1499,15 @@ void D3D9Light::UpdateLight(const LightEmitter *_le, const class vObject *vo)
 	//oapiWriteLogV("LightEmitter[0x%X] R=%f(m), P=%f(deg), U=%f(deg)", this, range, P*DEG, U*DEG);
 	range = min(range, float(((PointLight*)le)->GetRange()));
 
-	range2 = range*range;
-	Param[D3D9LRange] = range;
+	range2 = range*range;		// ORO patch (ah): range stays CPU-side (GetRange()); no shader reads it
 
 
 	// -----------------------------------------------------------------------------
 	if (Type != 0) {
-		D3DXVec3TransformNormal(&Direction, ptr(D3DXVEC(le->GetDirection())), vo->MWorld());
-		float angle = acos(dot(unit(Position), Direction));
+		D3DXVECTOR3 D3;
+		D3DXVec3TransformNormal(&D3, ptr(D3DXVEC(le->GetDirection())), vo->MWorld());
+		Direction = D3DXVECTOR4(D3, Direction.w);	// ORO patch (ah): keep the theta scale in .w
+		float angle = acos(dot(unit(P3), D3));
 		cone = ilerp(U * 0.5f, P * 0.5f, angle);
 	}
 }

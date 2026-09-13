@@ -243,13 +243,14 @@ void vVessel::PreInitObject()
 		OroHangTrace("stamp enter %s nmesh=%u", vessel->GetName(), nmesh);
 		// ORO patch (v): stamp each camera's GROUPS ranges onto the mesh instances,
 		// so the group loop in D3D9Mesh::Render can swap probes per group. Ranges
-		// apply to every mesh of the vessel (reflective hulls are single-mesh in
-		// practice; a per-mesh syntax can come later if one ever isn't).
+		// apply to every mesh of the vessel; MESHGROUPS m a b (ORO patch (ah), DaveS's
+		// SSV) pins a range to ONE mesh - the per-mesh syntax this note once deferred.
 		for (DWORD c = 1; c < pMatMgr->CameraCount(); c++) {
 			ENVCAMREC* eC = pMatMgr->GetCamera(c);
 			for (WORD r = 0; r < eC->nGrpRng; r++) {
 				const WORD g0 = eC->pGrpRng[r * 2], g1 = eC->pGrpRng[r * 2 + 1];
-				for (DWORD i = 0; i < nmesh; i++) if (meshlist[i].mesh)
+				const int  mS = eC->pGrpMesh ? eC->pGrpMesh[r] : -1;	// ORO patch (ah): MESHGROUPS names one mesh, GROUPS all
+				for (DWORD i = 0; i < nmesh; i++) if (meshlist[i].mesh && (mS < 0 || (DWORD)mS == i))
 					for (WORD g = g0; g <= g1; g++)
 						meshlist[i].mesh->SetGroupEnvCam(g, BYTE(c));
 			}
@@ -259,7 +260,8 @@ void vVessel::PreInitObject()
 			ENVPLNREC* eP = pMatMgr->GetPlane(p);
 			for (WORD r = 0; r < eP->nGrpRng; r++) {
 				const WORD g0 = eP->pGrpRng[r * 2], g1 = eP->pGrpRng[r * 2 + 1];
-				for (DWORD i = 0; i < nmesh; i++) if (meshlist[i].mesh)
+				const int  mS = eP->pGrpMesh ? eP->pGrpMesh[r] : -1;	// ORO patch (ah): MESHGROUPS
+				for (DWORD i = 0; i < nmesh; i++) if (meshlist[i].mesh && (mS < 0 || (DWORD)mS == i))
 					for (WORD g = g0; g <= g1; g++)
 						meshlist[i].mesh->SetGroupRflPlane(g, BYTE(p + 1));
 			}

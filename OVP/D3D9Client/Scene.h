@@ -181,28 +181,40 @@ public:
 	// as casters), consumed by the terrain shader so a spotlight beam is carved by a
 	// building and a vessel standing in the beam casts onto the ground. idx = the
 	// scene light (Lights[]) being shadowed, -1 = no map this frame.
+	// ORO patch (ah) step 4: up to SIX maps a frame - one per shadow-casting spot light or per
+	// CLUSTER of lights standing together (Scene::RenderLocalLightShadowMap2 has the story).
+	// Each is rendered through the scratch target and copied into a CELL: the cascade atlas'
+	// spare row in mode 3, the small local atlas in modes 0-2, or left in the scratch when one
+	// map is all there is. A light carries its own map in Lights[i].Diffuse.a (cell + 1; 0 =
+	// none), so every mesh's and tile's light copy knows without a per-slot match, and the
+	// receivers rebuild the map's frame from (pos, tan(fov/2)) + (dir, range) with the near
+	// plane at ORO_LCL_NF x range - two float4 per map instead of a matrix.
 	struct LOCALSHADOWPARAM {
-		LPDIRECT3DTEXTURE9 pShadowMap;
-		D3DXMATRIX	mViewProj;
-		D3DXVECTOR3	pos;		// light position, camera-centred world
-		float		range;		// light range [m]
-		int			idx;		// scene light index, -1 = none
-		int			size;		// map size in texels
-		float		texel;		// world texel size per metre of light distance
-								// (2 tan(fov/2) / size) - drives the receivers'
-								// NORMAL-OFFSET, the grazing-acne cure
-		float		kdepth;		// near*far/(far-near): converts metres-along-ray to
-								// the map's 1-z/w units - drives the receivers'
-								// TEXEL-FOOTPRINT bias (grazing, exact, no fade)
-		bool		terrainOK;	// 2026-09-05, the DAY SPLIT: false while the sun is
-								// up. Gates ONLY the terrain receiver's sampler
-								// borrow (Surfmgr2) - the daylight conflict was
-								// always the borrow's, never the test's. Vessels
-								// bind both maps with headroom and receive day and
-								// night; casters and registration key off idx alone.
-	} lsmap;
+		D3DXMATRIX  mViewProj;  // the caster pass's light view-projection
+		D3DXVECTOR3 pos;        // map origin (the light, or the cluster's centroid), camera-centred world
+		D3DXVECTOR3 dir;        // map axis, unit
+		float       range;      // the far plane = the light's reach [m]
+		float       tanHalf;    // tan(fov/2) after the caster fit
+		int         idx;        // the leading scene light (Lights[]), -1 = none
+		int         cell;       // the atlas cell it was copied into (= its index)
+		const LightEmitter* le; // the leader's emitter - the hysteresis key (scene indices reshuffle every frame; emitters do not)
+		int         kind;       // ORO patch (ah) step 5: 0 spot, 1 aimed point map, 2 cube face
+	};
+	LOCALSHADOWPARAM lsmaps[6];
+	int  nLclMaps;              // live maps this frame
+	bool lsTerrainOK;           // the terrain BORROW's day gate (modes 0-2; the atlas needs none) - 2026-09-05, the day split
+	const LightEmitter* lclPrevLe[6];   // last frame's leaders
+	int  nLclPrev;
 
-	const LOCALSHADOWPARAM * GetLocalShadowData() const { return &lsmap; }
+	int  GetLocalShadowCount() const { return nLclMaps; }
+	const LOCALSHADOWPARAM* GetLocalShadowMap(int k) const { return &lsmaps[k]; }
+	bool LocalShadowTerrainOK() const { return lsTerrainOK; }
+	// the receivers' constants: per map P = (origin, cell*10 + tan), D = (axis, range); A = (live maps,
+	// cells per row, first row's v, cell size in texels); B = (cell w, cell h, texel u, texel v); the
+	// texture the cells live in. bVessel: the mesh family reads a lone map from the scratch at full
+	// size; the terrain reads the atlas it already has bound in mode 3 (Surfmgr2 borrows otherwise).
+	void GetLocalShadowConstants(D3DXVECTOR4* P, D3DXVECTOR4* Dd, D3DXVECTOR4* A, D3DXVECTOR4* B, LPDIRECT3DTEXTURE9* pTex, bool bVessel) const;
+	void PushLocalShadowConstants();   // the mesh family's uniforms + texture, once per frame
 
 	// ⛔ ORO patch (z3) round 3 (the BASE SUN MAP - draped building shadows onto
 	// terrain via a coarse ortho map bound into the TerrainShadowing-2 slots) was
@@ -419,6 +431,8 @@ public:
 	float			GetCameraAspect() const { return (float)Camera.aspect; }
 	float			GetCameraFarPlane() const { return Camera.farplane; }
 	float			GetCameraNearPlane() const { return Camera.nearplane; }
+	float			GetRingNearCut() const { return m_ringNearCut; }   // ORO patch (aj) round 2: the planet pass's near plane while the main scene is in z-clear mode (the rings crossfade to a near-field draw there), else 0
+	float			m_ringNearCut = 0.0f;                              //   set beside bClearZBuffer in RenderMainScene, cleared after the near-field ring draw
 	float			GetCameraAperture() const { return (float)Camera.aperture; }
 	VECTOR3			GetCameraGPos() const { return Camera.pos; }
 	// ORO patch (k): snapshot of the camera the CURRENT frame is being rendered with -
@@ -646,6 +660,12 @@ private:
 	LPDIRECT3DTEXTURE9 ptLclShm;
 	LPDIRECT3DSURFACE9 psLclShm;
 	LPDIRECT3DSURFACE9 psLclShmDS;
+	int  lclScratchSize;				// its size in texels
+	// ORO patch (ah) step 4: the LOCAL ATLAS of half-size cells for modes 0-2 (2x2 or 3x2);
+	// in Cascaded mode the maps ride the cascade atlas' spare row and this stays NULL
+	LPDIRECT3DTEXTURE9 ptLclAtl;
+	LPDIRECT3DSURFACE9 psLclAtl;
+	int  lclAtlCols, lclAtlRows, lclCellPx;
 	void RenderLocalLightShadowMap();
 	// ORO patch (z3) round 2c: terrain casters - registered tiles (AddRef'd VB/IB,
 	// released when they age out) + the tiny depth-only tile shader (TileShdVS/PS
@@ -707,8 +727,8 @@ public:
 	// ORO patch (ae): the cascade atlas for the terrain (Surfmgr2) - live only after
 	// RenderCascadeShadows ran this frame
 	bool CascadesLive() const { return cascLive; }
-	// round 8: the local light's shadow map sits in the atlas' spare row this frame
-	// (cell 0 of row 3, half-size) - the terrain samples it there beside the sun's
+	// round 8 / (ah) step 4: the local lights' shadow maps sit in the atlas' spare row this
+	// frame (up to six half-size cells) - the terrain samples them there beside the sun's
 	// cascades, no sampler slot borrowed, so the (z3) day gate no longer applies
 	bool CascadeHasLocal() const { return cascLclLive; }
 	LPDIRECT3DTEXTURE9 GetCascadeAtlas() const { return ptCasc; }

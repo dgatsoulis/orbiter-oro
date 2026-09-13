@@ -36,8 +36,10 @@ D3DXHANDLE D3D9Effect::eBeaconArrayTech = 0;
 D3DXHANDLE D3D9Effect::eExhaust = 0;	// Render engine exhaust texture
 D3DXHANDLE D3D9Effect::eSpotTech = 0;	// Vessel beacons
 D3DXHANDLE D3D9Effect::eBaseTile = 0;
+D3DXHANDLE D3D9Effect::eWetOverlay = 0;	// ORO 2026-09-10
 D3DXHANDLE D3D9Effect::eRingTech = 0;	// Planet rings technique
 D3DXHANDLE D3D9Effect::eRingTech2 = 0;	// Planet rings technique
+D3DXHANDLE D3D9Effect::eRingTechORO = 0;	// ORO patch (aj): the ORO ring technique
 D3DXHANDLE D3D9Effect::eShadowTech = 0; // Vessel ground shadows
 D3DXHANDLE D3D9Effect::eArrowTech = 0;  // (Grapple point) arrows
 D3DXHANDLE D3D9Effect::eAxisTech = 0;
@@ -68,8 +70,10 @@ D3DXHANDLE D3D9Effect::eTune = 0;
 D3DXHANDLE D3D9Effect::eSun = 0;
 D3DXHANDLE D3D9Effect::eNight = 0;
 D3DXHANDLE D3D9Effect::eLights = 0;		// Additional light sources
-D3DXHANDLE D3D9Effect::eLclShdVP = 0;	// ORO patch (z3) 2b: local-light shadow view-proj
-D3DXHANDLE D3D9Effect::eLclShd = 0;		// ORO patch (z3) 2b: slot + 1/mapsize
+D3DXHANDLE D3D9Effect::eLclShdP = 0;	// ORO patch (ah) step 4: per spot map - origin, cell*10 + tan(fov/2)
+D3DXHANDLE D3D9Effect::eLclShdD = 0;	// ORO patch (ah) step 4: per spot map - axis, range
+D3DXHANDLE D3D9Effect::eLclShd = 0;		// ORO patch (z3) 2b / (ah) 4: live maps, cells per row, first row v, cell texels
+D3DXHANDLE D3D9Effect::eLclAtl = 0;		// ORO patch (ah) step 4: cell size in uv, one texel in uv
 D3DXHANDLE D3D9Effect::eLclShmTex = 0;	// ORO patch (z3) 2b: the local-light shadow map
 
 D3DXHANDLE D3D9Effect::eTex0 = 0;		// Primary texture
@@ -118,10 +122,22 @@ D3DXHANDLE D3D9Effect::eCascAtlas = 0;	// ORO patch (ae)
 D3DXHANDLE D3D9Effect::eCascMap = 0;	// ORO patch (ae)
 D3DXHANDLE D3D9Effect::eBaseGlow = 0;	// FLOAT ORO patch (ac)
 D3DXHANDLE D3D9Effect::eBaseHalo = 0;	// FLOAT ORO patch (ac) part 2
+D3DXHANDLE D3D9Effect::eBaseLocal = 0;	// FLOAT ORO 2026-09-10 (A5)
+D3DXHANDLE D3D9Effect::eBaseGround = 0;	// FLOAT ORO 2026-09-11
 D3DXHANDLE D3D9Effect::eWetReflTex = 0;	// TEXTURE ORO patch (s) part 6
 D3DXHANDLE D3D9Effect::eWetReflPrm = 0;	// FLOAT4 ORO patch (s) part 6
 D3DXHANDLE D3D9Effect::eWetSwimPrm = 0;	// FLOAT4 ORO patch (s) part 6: swim scales
 D3DXHANDLE D3D9Effect::eWetGrainPrm = 0;	// FLOAT4 ORO patch (s) part 7: grain
+D3DXHANDLE D3D9Effect::eRingPrm  = 0;	// FLOAT4 ORO patch (aj): rings look
+D3DXHANDLE D3D9Effect::eRingRad  = 0;	// FLOAT4 ORO patch (aj): rings radii
+D3DXHANDLE D3D9Effect::eRingShd  = 0;	// FLOAT4 ORO patch (aj): ring plane normal
+D3DXHANDLE D3D9Effect::eRingProf = 0;	// TEXTURE ORO patch (aj): ring profile
+D3DXHANDLE D3D9Effect::eRingPrm2 = 0;	// FLOAT4 ORO patch (aj) round 2: the close-up's amplitudes + offsets
+D3DXHANDLE D3D9Effect::eRingPrm3 = 0;	// FLOAT4 ORO patch (aj) round 2: the close-up's cell scales
+D3DXHANDLE D3D9Effect::eRingAxR  = 0;	// FLOAT4 ORO patch (aj) round 2: camera radial direction, ring plane
+D3DXHANDLE D3D9Effect::eRingAxT  = 0;	// FLOAT4 ORO patch (aj) round 2: camera along-track direction
+D3DXHANDLE D3D9Effect::eRingCut  = 0;	// FLOAT4 ORO patch (aj) round 2: camera forward + the near-field seam depth
+D3DXHANDLE D3D9Effect::eRingPrm4 = 0;	// FLOAT4 ORO patch (aj) round 2: lanes 12..15 (relief)
 D3DXHANDLE D3D9Effect::eFogDensity = 0;	// 
 D3DXHANDLE D3D9Effect::ePointScale = 0;
 D3DXHANDLE D3D9Effect::eSHD = 0;
@@ -335,7 +351,7 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
 	
 	// Create the Effect from a .fx file.
 	ID3DXBuffer* errors = 0;
-	D3DXMACRO macro[18]; memset(&macro, 0, 16*sizeof(D3DXMACRO));
+	D3DXMACRO macro[18]; memset(&macro, 0, 18*sizeof(D3DXMACRO));
 
 	sprintf_s(name,256,"Modules/D3D9Client/D3D9Client.fx");
 
@@ -369,13 +385,22 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
 	else							sprintf_s((char*)macro[5].Definition, 32, "%f", 1.0f / 27.0f); // 0.04634f);
 	// ------------------------------------------------------------------------------
 
-	int m = 6;
+	// ------------------------------------------------------------------------------
+	// ORO patch (ah) step 4: how many spot shadow maps the receivers can read (sizes the two
+	// per-map float4 arrays - two registers per map, so the count is compiled in, not maxed)
+	macro[6].Name = "LCLMAPS";
+	macro[6].Definition = new char[32];
+	sprintf_s((char*)macro[6].Definition, 32, "%d", Config->LocalLightShadows ? max(1, min(6, Config->LocalLightShadowMaps)) : 1);
+	// ------------------------------------------------------------------------------
+
+	int m = 7;
 	if (Config->EnableGlass) macro[m++].Name = "_GLASS";
 	if (Config->EnableMeshDbg) macro[m++].Name = "_DEBUG";
 	if (Config->EnvMapMode) macro[m++].Name = "_ENVMAP"; 
 	if (Config->PostProcess == PP_DEFAULT) macro[m++].Name = "_LIGHTGLOW";
 	if (Config->bIrradiance && Config->EnvMapMode) macro[m++].Name = "_IRRADIANCE";
-	if (Config->TerrainShadowing == 3) macro[m++].Name = "_CASCADE";	// ORO patch (ae): the cascade lookups exist in mode 3 only
+	if (Config->TerrainShadowing == 3) macro[m++].Name = "_CASCADE";
+	if (Config->LocalLightShadows && Config->LocalLightShadowPoint == 2) macro[m++].Name = "_LCLCUBE";	// ORO patch (ah) step 5: the cube-face pick exists only when the Cube row is chosen (~440 slots)	// ORO patch (ae): the cascade lookups exist in mode 3 only
 	
 	
 	HR(D3DXCreateEffectFromFileA(pDev, name, macro, 0, D3DXSHADER_NO_PRESHADER|D3DXSHADER_PREFER_FLOW_CONTROL, 0, &FX, &errors));
@@ -386,12 +411,14 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
 	delete []macro[3].Definition;
 	delete []macro[4].Definition;
 	delete []macro[5].Definition;
+	delete []macro[6].Definition;
 	macro[0].Definition = NULL;
 	macro[1].Definition = NULL;
 	macro[2].Definition = NULL;
 	macro[3].Definition = NULL;
 	macro[4].Definition = NULL;
 	macro[5].Definition = NULL;
+	macro[6].Definition = NULL;
 
 	if (errors) {
 		LogErr("Effect Error: %s",(char*)errors->GetBufferPointer());
@@ -422,12 +449,14 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
 	eHazeTech	 = FX->GetTechniqueByName("HazeTech");
 	ePlanetTile  = FX->GetTechniqueByName("PlanetTech");
 	eBaseTile    = FX->GetTechniqueByName("BaseTileTech");
+	eWetOverlay  = FX->GetTechniqueByName("WetOverlayTech");	// ORO 2026-09-10
 	eSimple      = FX->GetTechniqueByName("SimpleTech");
 	eBBTech		 = FX->GetTechniqueByName("BoundingBoxTech");
 	eTBBTech	 = FX->GetTechniqueByName("TileBoxTech");
 	eBSTech		 = FX->GetTechniqueByName("BoundingSphereTech");
 	eRingTech    = FX->GetTechniqueByName("RingTech");
 	eRingTech2   = FX->GetTechniqueByName("RingTech2");
+	eRingTechORO = FX->GetTechniqueByName("RingTechORO");   // ORO patch (aj)
 	eExhaust     = FX->GetTechniqueByName("ExhaustTech");
 	eSpotTech    = FX->GetTechniqueByName("SpotTech");
 	eShadowTech  = FX->GetTechniqueByName("ShadowTech");
@@ -466,8 +495,10 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
 	// General parameters -------------------------------------------------- 
 	eSpecularMode = FX->GetParameterByName(0,"gSpecMode");
 	eLights		  = FX->GetParameterByName(0,"gLights");
-	eLclShdVP	  = FX->GetParameterByName(0,"gLclShdVP");	// ORO patch (z3) 2b
+	eLclShdP	  = FX->GetParameterByName(0,"gLclShdP");	// ORO patch (ah) step 4
+	eLclShdD	  = FX->GetParameterByName(0,"gLclShdD");	// ORO patch (ah) step 4
 	eLclShd		  = FX->GetParameterByName(0,"gLclShd");	// ORO patch (z3) 2b
+	eLclAtl		  = FX->GetParameterByName(0,"gLclAtl");	// ORO patch (ah) step 4
 	eLclShmTex	  = FX->GetParameterByName(0,"gLclShmTex");	// ORO patch (z3) 2b
 	eColor		  = FX->GetParameterByName(0,"gColor");
 	eDistScale    = FX->GetParameterByName(0,"gDistScale");
@@ -489,6 +520,16 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
 	eWetReflPrm   = FX->GetParameterByName(0,"gWetReflPrm");
 	eWetSwimPrm   = FX->GetParameterByName(0,"gWetSwimPrm");
 	eWetGrainPrm  = FX->GetParameterByName(0,"gWetGrainPrm");
+	eRingPrm      = FX->GetParameterByName(0,"gRingPrm");     // ORO patch (aj)
+	eRingRad      = FX->GetParameterByName(0,"gRingRad");     // ORO patch (aj)
+	eRingShd      = FX->GetParameterByName(0,"gRingShd");     // ORO patch (aj)
+	eRingProf     = FX->GetParameterByName(0,"gRingProf");    // ORO patch (aj)
+	eRingPrm2     = FX->GetParameterByName(0,"gRingPrm2");    // ORO patch (aj) round 2
+	eRingPrm3     = FX->GetParameterByName(0,"gRingPrm3");    // ORO patch (aj) round 2
+	eRingAxR      = FX->GetParameterByName(0,"gRingAxR");     // ORO patch (aj) round 2
+	eRingAxT      = FX->GetParameterByName(0,"gRingAxT");     // ORO patch (aj) round 2
+	eRingCut      = FX->GetParameterByName(0,"gRingCut");     // ORO patch (aj) round 2: the near-field seam
+	eRingPrm4     = FX->GetParameterByName(0,"gRingPrm4");    // ORO patch (aj) round 2: lanes 12..15 (relief)
 	eFogPrm       = FX->GetParameterByName(0,"gFogPrm");
 	eFogClr       = FX->GetParameterByName(0,"gFogClr");
 	eSnow         = FX->GetParameterByName(0,"gSnow");
@@ -503,6 +544,8 @@ void D3D9Effect::D3D9TechInit(D3D9Client *_gc, LPDIRECT3DDEVICE9 _pDev, const ch
 	eCascMap      = FX->GetParameterByName(0,"gCascMap");
 	eBaseGlow     = FX->GetParameterByName(0,"gBaseGlow");
 	eBaseHalo     = FX->GetParameterByName(0,"gBaseHalo");
+	eBaseLocal    = FX->GetParameterByName(0,"gBaseLocal");
+	eBaseGround   = FX->GetParameterByName(0,"gBaseGround");	// ORO 2026-09-11
 	eTime		  = FX->GetParameterByName(0,"gTime");
 	eMtrlAlpha	  = FX->GetParameterByName(0,"gMtrlAlpha");
 	eGlowConst    = FX->GetParameterByName(0,"gGlowConst");

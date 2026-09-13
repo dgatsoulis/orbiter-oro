@@ -495,6 +495,8 @@ static void OroUpdateShadowControls(HWND hWnd)
 	EnableWindow(GetDlgItem(hWnd, IDC_CASCFAR_DSP), casc);
 	EnableWindow(GetDlgItem(hWnd, IDC_CASCSOFT), casc);
 	EnableWindow(GetDlgItem(hWnd, IDC_LCLSHADOWS), lcl);
+	const int spots = (int)SendDlgItemMessage(hWnd, IDC_LCLSHADOWS, CB_GETCURSEL, 0, 0);	// ORO patch (ah) step 5: point lights need the spot maps on
+	EnableWindow(GetDlgItem(hWnd, IDC_LCLPOINT), lcl && spots > 0);
 }
 
 INT_PTR CALLBACK VideoTab::SetupDlgProcWrp(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -545,6 +547,7 @@ INT_PTR CALLBACK VideoTab::SetupDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
 		case IDC_SELFSHADOWS:
 		case IDC_TERRAIN:
 		case IDC_LIGHTCONFIG:
+		case IDC_LCLSHADOWS:	// ORO patch (ah) step 5
 			if (HIWORD(wParam) == CBN_SELCHANGE) OroUpdateShadowControls(hWnd);
 			break;
 
@@ -748,6 +751,13 @@ void VideoTab::InitSetupDialog(HWND hWnd)
 	SendDlgItemMessageA(hWnd, IDC_LIGHTCONFIG, CB_ADDSTRING, 0, (LPARAM)"4x Full");
 	SendDlgItemMessageA(hWnd, IDC_LIGHTCONFIG, CB_ADDSTRING, 0, (LPARAM)"8x Partial");
 	SendDlgItemMessageA(hWnd, IDC_LIGHTCONFIG, CB_ADDSTRING, 0, (LPARAM)"8x Full");
+	// ORO patch (ah) step 3 (2026-09-08): 12x and 16x. The light struct repack (step 1) made room -
+	// 16x Full + cascades measures 171 of 224 constant registers (tools/fxeff); before it did not
+	// compile. Per MESH caps, like the rows above; the terrain keeps its own four per tile.
+	SendDlgItemMessageA(hWnd, IDC_LIGHTCONFIG, CB_ADDSTRING, 0, (LPARAM)"12x Partial");
+	SendDlgItemMessageA(hWnd, IDC_LIGHTCONFIG, CB_ADDSTRING, 0, (LPARAM)"12x Full");
+	SendDlgItemMessageA(hWnd, IDC_LIGHTCONFIG, CB_ADDSTRING, 0, (LPARAM)"16x Partial");
+	SendDlgItemMessageA(hWnd, IDC_LIGHTCONFIG, CB_ADDSTRING, 0, (LPARAM)"16x Full");
 
 	// Shadows -----------------------------------------
 
@@ -783,6 +793,18 @@ void VideoTab::InitSetupDialog(HWND hWnd)
 	SendDlgItemMessageA(hWnd, IDC_CASCSIZE, CB_ADDSTRING, 0, (LPARAM)"4096  (768 MB)");
 	SendDlgItemMessage(hWnd, IDC_CASCFAR, TBM_SETRANGEMAX, 1, 60);		// km
 	SendDlgItemMessage(hWnd, IDC_CASCFAR, TBM_SETRANGEMIN, 1, 5);
+	// ORO patch (ah) step 4: the spot shadow rows - Off, or how many lights cast at once
+	SendDlgItemMessage(hWnd, IDC_LCLSHADOWS, CB_RESETCONTENT, 0, 0);
+	SendDlgItemMessageA(hWnd, IDC_LCLSHADOWS, CB_ADDSTRING, 0, (LPARAM)"Off");
+	SendDlgItemMessageA(hWnd, IDC_LCLSHADOWS, CB_ADDSTRING, 0, (LPARAM)"1 spot map");
+	SendDlgItemMessageA(hWnd, IDC_LCLSHADOWS, CB_ADDSTRING, 0, (LPARAM)"2 spot maps");
+	SendDlgItemMessageA(hWnd, IDC_LCLSHADOWS, CB_ADDSTRING, 0, (LPARAM)"4 spot maps");
+	SendDlgItemMessageA(hWnd, IDC_LCLSHADOWS, CB_ADDSTRING, 0, (LPARAM)"6 spot maps");
+	// ORO patch (ah) step 5: point lights - an aimed map, or a five-face cube when five cells are free
+	SendDlgItemMessage(hWnd, IDC_LCLPOINT, CB_RESETCONTENT, 0, 0);
+	SendDlgItemMessageA(hWnd, IDC_LCLPOINT, CB_ADDSTRING, 0, (LPARAM)"Off");
+	SendDlgItemMessageA(hWnd, IDC_LCLPOINT, CB_ADDSTRING, 0, (LPARAM)"Aimed map");
+	SendDlgItemMessageA(hWnd, IDC_LCLPOINT, CB_ADDSTRING, 0, (LPARAM)"Cube (5 maps)");
 
 	SendDlgItemMessage(hWnd, IDC_MESHRES, CB_RESETCONTENT, 0, 0);
 	SendDlgItemMessageA(hWnd, IDC_MESHRES, CB_ADDSTRING, 0, (LPARAM)"16");
@@ -881,7 +903,12 @@ void VideoTab::InitSetupDialog(HWND hWnd)
 		SendDlgItemMessage(hWnd, IDC_CASCFAR, TBM_SETPOS, 1, (LPARAM)km);
 		SetWindowTextA(GetDlgItem(hWnd, IDC_CASCFAR_DSP), lbl);
 	}
-	SendDlgItemMessage(hWnd, IDC_LCLSHADOWS, BM_SETCHECK, Config->LocalLightShadows == 1, 0);
+	{	// ORO patch (ah) step 4: Off / 1 / 2 / 4 / 6 (the count snaps to the list)
+		const int m = Config->LocalLightShadowMaps;
+		const int sel = (Config->LocalLightShadows == 0) ? 0 : (m < 2) ? 1 : (m < 4) ? 2 : (m < 6) ? 3 : 4;
+		SendDlgItemMessage(hWnd, IDC_LCLSHADOWS, CB_SETCURSEL, sel, 0);
+	}
+	SendDlgItemMessage(hWnd, IDC_LCLPOINT, CB_SETCURSEL, max(0, min(2, Config->LocalLightShadowPoint)), 0);	// ORO patch (ah) step 5
 	SendDlgItemMessage(hWnd, IDC_CASCSOFT, BM_SETCHECK, Config->ShadowCascadeSoft == 1, 0);
 	OroUpdateShadowControls(hWnd);
 	SendDlgItemMessage(hWnd, IDC_PRTLIGHT, CB_SETCURSEL, Config->ParticleLight, 0);	// ORO patch (x)
@@ -966,7 +993,13 @@ void VideoTab::SaveSetupState(HWND hWnd)
 	Config->ShadowMapSize      = 1024 << max(0, min(2, (int)SendDlgItemMessage(hWnd, IDC_SHDMAPSIZE, CB_GETCURSEL, 0, 0)));
 	Config->ShadowCascadeSize  = 1024 << max(0, min(2, (int)SendDlgItemMessage(hWnd, IDC_CASCSIZE, CB_GETCURSEL, 0, 0)));
 	Config->ShadowCascadeFar   = 1000.0 * max(5, min(60, (int)SendDlgItemMessage(hWnd, IDC_CASCFAR, TBM_GETPOS, 0, 0)));
-	Config->LocalLightShadows  = (int)SendDlgItemMessage(hWnd, IDC_LCLSHADOWS, BM_GETCHECK, 0, 0);
+	{	// ORO patch (ah) step 4: Off keeps the last count, so re-enabling returns to it
+		const int sel = (int)SendDlgItemMessage(hWnd, IDC_LCLSHADOWS, CB_GETCURSEL, 0, 0);
+		static const int maps[5] = { 1, 1, 2, 4, 6 };
+		Config->LocalLightShadows = (sel > 0) ? 1 : 0;
+		if (sel > 0 && sel <= 4) Config->LocalLightShadowMaps = maps[sel];
+	}
+	Config->LocalLightShadowPoint = max(0, min(2, (int)SendDlgItemMessage(hWnd, IDC_LCLPOINT, CB_GETCURSEL, 0, 0)));	// ORO patch (ah) step 5
 	Config->ShadowCascadeSoft  = (int)SendDlgItemMessage(hWnd, IDC_CASCSOFT, BM_GETCHECK, 0, 0);
 	Config->gcGUIMode	  = (int)SendDlgItemMessage(hWnd, IDC_GUIMODE, CB_GETCURSEL, 0, 0);
 	Config->MeshRes		  = int(SendDlgItemMessage(hWnd, IDC_MESHRES, CB_GETCURSEL, 0, 0));

@@ -32,6 +32,8 @@ RingManager::RingManager (const vPlanet *vplanet, double inner_rad, double outer
 
 	for (DWORD i = 0; i < MAXRINGRES; i++) {
 		mesh[i] = 0;
+		meshORO[i] = 0;   // ORO patch (aj)
+		meshNear = 0;     // ORO patch (aj) round 2
 		tex[i] = 0;
 	}
 }
@@ -40,6 +42,8 @@ RingManager::~RingManager ()
 {
 	DWORD i;
 	for (i = 0; i < 3; i++)	if (mesh[i]) delete mesh[i];
+	for (i = 0; i < 3; i++)	if (meshORO[i]) delete meshORO[i];   // ORO patch (aj)
+	if (meshNear) delete meshNear;                                   // ORO patch (aj) round 2
 	for (i = 0; i < ntex; i++) ReleaseTex(tex[i]);
 	if (pTex) pTex->Release();
 }
@@ -119,11 +123,71 @@ bool RingManager::Render(LPDIRECT3DDEVICE9 dev, D3DXMATRIX &mWorld, bool front)
 	D3DMAT_FromAxisT(&World, &x, &y, &z);
 
 	float rad = float(vp->GetSize());
-	
+
+	// ORO patch (aj) part 5 - A STOCK BUG, and the ring has been lit by an UNINITIALISED
+	// SUN. RenderRings/RenderRings2 both push the ring mesh's own D3D9Mesh::sunLight into
+	// gSun - but NOTHING ever calls SetSunLight on a ring mesh (every other mesh in the
+	// client gets one: Scene, VBase, VVessel, vPlanet's own), and neither D3D9Mesh::Null()
+	// nor any constructor initialises that member. So gSun.Dir was whatever the heap block
+	// happened to hold. With it at zero - which is what a fresh block gives, and what his
+	// 2026-09-12 screenshot shows - two things in RingTech/RingTech2 collapse:
+	//   the PLANET'S SHADOW: da = dot(normalize(pp), gSun.Dir) = 0, so r = |pp|, which for
+	//     any ring fragment is >= irad, far past gRadius[1]; smoothstep returns 1 and sh is
+	//     1 everywhere. No shadow on the rings, ever.
+	//   the UNLIT FACE: dot(nrmW,CamW) * dot(nrmW,gSun.Dir) = 0, never > 0, so the backside
+	//     dimming never applies and the rings stay fully bright seen from the dark side.
+	// Both are visible in Orbiter 2016 and were gone in 2024. The planet's own surface is
+	// drawn from gc->GetScene()->GetSun() (SurfMgr.cpp:91/145), so taking the ring's sun
+	// from the same place makes the ring agree with the globe it surrounds by construction.
+	// !! This bit the ORO ring too - RingTechOROPS reads gSun.Dir for its sun obliquity,
+	// its lit/unlit split AND the planet shadow, so without this the new shader's first
+	// flight would have looked wrong for a reason that was never in the new shader.
+	const D3D9Sun* pSun = gc->GetScene()->GetSun();
+
+	// ORO patch (aj): when the addon has pushed a look + profile for this planet, draw the
+	// ORO ring - on a finer disc (the stock one's inner edge is a 16-gon), through the
+	// per-pixel radial path whatever texture format the planet shipped (this is what puts
+	// Uranus's narrow rings on the per-pixel path). The uniforms and the profile texture
+	// were bound by vPlanet::Render's bracket, which also serves the planet's shadow pass.
+	if (gcGetRingLook(vp->Object())) {
+		if (!meshORO[rres]) meshORO[rres] = CreateRing(irad, orad, 64 << rres);   // 64 / 128 / 256
+		meshORO[rres]->SetSunLight(pSun);
+		meshORO[rres]->RenderRingsORO(&World);
+		return true;
+	}
+
+	mesh[rres]->SetSunLight(pSun);
 	if (pTex) {
 		mesh[rres]->RenderRings2(&World, pTex, float(irad)*rad, float(orad)*rad);
 	}
 	else mesh[rres]->RenderRings(&World, tex[tres]);
+	return true;
+}
+
+// =======================================================================
+// ORO patch (aj) round 2: THE NEAR-FIELD DISC. The ring mesh is 137,000 km across, and a
+// fragment's camera-relative position (CamW, what the close-up's grain and specks are
+// built from) is interpolated from vertices 100,000 km away in float32: ~8 m of error,
+// re-rounded every frame the camera moves. At 25 km that is under a pixel; at 1 km it is
+// ten, and flight 5 watched the grain "vibrate left-right" and the specks shake. So the
+// near field is drawn on a UNIT half-disc placed by a matrix whose scale is the reach
+// (a few tens of km) and whose translation is the camera's foot point on the plane
+// (metres): every vertex is small, so every interpolated position is exact to
+// millimetres. Drawn twice with the x/z rows negated, the ring manager's own flip, for
+// the full disc. Same shader, same bracket: RingTechOROPS takes the radius from the
+// camera-relative position plus gCameraPos, never from the mesh, which is what makes a
+// disc that knows nothing about the ring's radii draw the right ring.
+//
+bool RingManager::RenderNearField(LPDIRECT3DDEVICE9 dev, const D3DXMATRIX &W)
+{
+	if (!gcGetRingLook(vp->Object())) return false;
+	if (!meshNear) meshNear = CreateRing(0.0, 1.0, 64);   // a fan: the inner edge collapses to the centre
+	meshNear->SetSunLight(gc->GetScene()->GetSun());
+	D3DXMATRIX W1 = W, W2 = W;
+	W2._11 = -W._11; W2._12 = -W._12; W2._13 = -W._13;
+	W2._31 = -W._31; W2._32 = -W._32; W2._33 = -W._33;
+	meshNear->RenderRingsORO(&W1);
+	meshNear->RenderRingsORO(&W2);
 	return true;
 }
 

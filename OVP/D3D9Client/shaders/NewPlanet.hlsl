@@ -227,24 +227,41 @@ uniform extern float4 gWetGrainPrm = {1, 1, 0, 0}; // ORO patch (s) part 7: grai
 sampler tWetRefl;                     // ORO patch (s) part 6: the planar mirror
 // ORO patch (z3): the LOCAL-LIGHT shadow map - one perspective depth map rendered from
 // the frame's strongest shadow-casting SPOT light (Scene::RenderLocalLightShadowMap).
-// vLShd.x = which of THIS TILE's four light slots it shadows (-1 = none), .y = 1/mapsize.
+// (ah) step 4: up to SIX maps, each light naming its own in its Falloff lane - see vLclP below.
 // Standalone uniforms by the patch (s) rule: the mirrored Prm struct is never grown.
 // ⚠️ NO SAMPLER OF ITS OWN: the Earth config with _DEVTOOLS sits at EXACTLY the ps_3_0
 // 16-sampler ceiling in stock (X4510 with a 17th - flown, not theorised), so the local
-// map BORROWS the tShadowMap slot per tile. A tile whose vLShd.x >= 0 gets the local
-// map bound there and its bShadows forced off (Surfmgr2), yielding the sun's projected
+// map BORROWS the tShadowMap slot per tile. A tile with a shadowed light gets the local
+// texture bound there and its bShadows forced off (Surfmgr2), yielding the sun's projected
 // shadow on that tile for the frame - a tile inside a spotlight's beam, which matters
 // at night, where the sun term is ~0 anyway. Every other tile keeps the sun map.
 // ORO patch (ae): THE CASCADED SUN SHADOW ATLAS - see D3D9Client.fx for the story. The
-// atlas rides tShadowMap in mode 3 (Surfmgr2 binds it per tile; a tile that borrowed
-// the slot for a LOCAL light has vLShd.x >= 0 and skips the lookup).
-uniform extern float4   vCascBasis[3];   // round 7: the shared light basis U, V, L (U.w = ShadowDebug)
+// atlas rides tShadowMap in mode 3 (Surfmgr2 binds it per tile; the local maps sit in its
+// spare row, so nothing is borrowed there).
+uniform extern float4   vCascBasis[3];   // round 7: the shared light basis U, V, L (U.w = ShadowDebug, V.w = Soft far shadows,
+                                         // L.w = the NORMAL OFFSET in texels - ShadowCascadeOffset, the 2026-09-13 moire fix)
 uniform extern float4   vCascA[9];       // per slot: centre u, centre v, near-plane depth, 1/range
-uniform extern float4   vCascTx[3];      // the nine slots' texels (m), four to a register
+uniform extern float4   vCascTx[3];      // the nine slots' texels (m), four to a register ([2].y = the SLOPE CLAMP, ShadowCascadeSlope)
 uniform extern float4   vCascSplit = {0, 0, 0, 0};
 uniform extern float4   vCascAtlas = {0, 0, 0, 0};
-uniform extern float4x4 mLsVP;
-uniform extern float4   vLShd = {-1.0, 0.0, 0.0, 0.0};
+// ORO patch (ah) step 4: the spot shadow MAPS (up to six - the count compiled in by the _LCLn flag,
+// two float4 per map), the terrain's twin of Common.hlsl's gLclShd*: a light names its map in its
+// Falloff lane (Lights.param[i][Falloff] = cell + 1, 0 = none; Surfmgr2 writes it), and the map's
+// frame is rebuilt from (origin, cell*10 + tan(fov/2)) and (axis, range), near = ORO_LCL_NF x range.
+#if defined(_LCL6)
+#define LCLMAPS_T 6
+#elif defined(_LCL4)
+#define LCLMAPS_T 4
+#elif defined(_LCL2)
+#define LCLMAPS_T 2
+#else
+#define LCLMAPS_T 1
+#endif
+#define ORO_LCL_NF 0.0075f
+uniform extern float4   vLclP[LCLMAPS_T];			// per map: origin xyz, w = cell * 10 + tan(fov/2)
+uniform extern float4   vLclD[LCLMAPS_T];			// per map: axis xyz (unit), w = range
+uniform extern float4   vLclShd = {0, 1, 0, 1};		// live maps, cells per row, first row's v, cell size in texels
+uniform extern float4   vLclAtl = {1, 1, 0, 0};		// cell width and height in uv, one texel in uv
 uniform extern PerObjectParams Prm;
 uniform extern FlowControlPS Flow;
 uniform extern FlowControlVS FlowVS;
@@ -313,59 +330,94 @@ float SampleShadows(float2 sp, float pd)
 // and ps_3_0 refuses divergent gradient ops there (the map has one mip anyway).
 // The bias is RELATIVE on (1 - z/w) - for a perspective map that peaks mid-beam and
 // vanishes at both ends, which is where slope acne actually lives.
-// tShadowMap here holds the LOCAL map, not the sun's - the borrowed slot (see the
-// vLShd comment above): Surfmgr2 rebinds it for exactly the tiles where vLShd.x >= 0.
+// tShadowMap here holds the LOCAL maps, not the sun's - the borrowed slot in modes 0-2 (see
+// the vLclP comment above): Surfmgr2 rebinds it for exactly the tiles with a shadowed light;
+// in mode 3 it is the cascade atlas, whose spare row holds the maps - nothing borrowed.
 //
-float SampleLocalShadow(float3 posW, float3 nrmW, float dstL, float nl)
+float SampleLocalShadow(float3 posW, float3 nrmW, float idx, float dstL, float nl)
 {
-	// ORO patch (ae) round 8: in mode 3 (the atlas bound, vCascAtlas.z > 0) the local
-	// map sits in the atlas' spare row, first cell, HALF-SIZE (a 2048 map lands in a
-	// 1024 cell, point-sampled), so its texel is coarser than vLShd says by
-	// k = map size / cell size; the offset and the bias scale with it, the taps step
-	// in atlas texels, and the sample stays inside the cell. Nothing is borrowed, so a
-	// tile gets the sun's cascades AND the beam's shadow, day and night.
-	const bool  inAtlas = (vCascAtlas.z > 0.5f);
-	const float k = inAtlas ? (6.0f * vCascAtlas.x) / vLShd.y : 1.0f;   // map texels per cell texel
-	const float tz = vLShd.z * k;
-
-	// NORMAL-OFFSET (vLShd.z = world texel per metre of light distance): push the
-	// receiver point ~2 map texels out along its surface normal before the depth
-	// test - the ordinary-acne cure.
-	posW += nrmW * (dstL * tz * 2.0f);
-
-	float4 q = mul(float4(posW, 1.0f), mLsVP);
-	if (q.w < 0.001f) return 1.0f;						// behind the light: lit
-	q.xyz /= q.w;
-	float2 sp = q.xy * float2(0.5f, -0.5f) + 0.5f;
-	if (sp.x < 0 || sp.x > 1 || sp.y < 0 || sp.y > 1) return 1.0f;	// outside the map: lit
-	if (q.z < 0 || q.z > 1) return 1.0f;
-
-	float pd = (1.0f - q.z) * 1.012f + 0.0008f;
-
-	// TEXEL-FOOTPRINT BIAS: at grazing incidence one texel's footprint on the
-	// receiving surface spans (texel / tan(incidence)) metres of ray depth, and
-	// the surface strobes against ITSELF within that span (the runway test's
-	// coherent black wedge - flown twice). Clear exactly that span, scaled by
-	// the PCF tap radius: near-nothing face-on, metres at grazing, and always
-	// far smaller than a REAL caster's depth separation, so building and vessel
-	// shadows stay solid. vLShd.w converts metres-along-ray to 1-z/w units.
-	float grz = sqrt(saturate(1.0f - nl * nl)) / max(nl, 0.05f);
-	pd += (tz * 3.0f) * grz * vLShd.w / max(dstL, 1.0f);
-
-	float2 dx = float2(vLShd.y, 0) * 1.5f;
-	float2 dy = float2(0, vLShd.y) * 1.5f;
-	if (inAtlas) {
-		const float2 uvo = float2(0.0f, 0.75f), sc = float2(1.0f / 6.0f, 0.25f);   // the cell: row 3, column 0
-		sp = clamp(uvo + sp * sc, uvo + vCascAtlas.xy * 2.0f, uvo + sc - vCascAtlas.xy * 2.0f);
-		dx = float2(vCascAtlas.x, 0) * 1.5f;
-		dy = float2(0, vCascAtlas.y) * 1.5f;
+	// ORO patch (ah) step 4 - Common.hlsl's OroLclShadow, verbatim but for the names: the map this
+	// light owns (idx = cell + 1) by select, its frame rebuilt from two float4, the cell in whichever
+	// texture tShadowMap holds this frame (the cascade atlas' spare row in mode 3, the borrowed local
+	// texture otherwise - Surfmgr2), 2x2 bilinear PCF inside the cell.
+	// a CUBE light (ORO patch (ah) step 5, index 100 + base cell) keeps its five faces at cells
+	// base..base+4; face 0 (down) carries the origin, the axis -up and the shared tan(fov/2). The
+	// face is picked here from the dominant axis of the light-to-pixel vector in the cube's basis,
+	// rebuilt from -up with the CPU's own rule - so one fetch serves all five faces.
+#ifdef _LCLCUBE
+	const bool  cube = (idx > 99.5f);
+#else
+	const bool  cube = false;							// no cube lights compiled in: the pick below folds away
+#endif
+	const float mi   = cube ? (idx - 99.0f) : idx;			// the map to fetch, 1-based
+	float4 P  = vLclP[0];
+	float4 Dm = vLclD[0];
+#if LCLMAPS_T > 1
+	[unroll] for (int k = 1; k < LCLMAPS_T; k++) {
+		if (abs(mi - (float)(k + 1)) < 0.5f) { P = vLclP[k]; Dm = vLclD[k]; }
 	}
-	float  va = 0;
-	if (tex2Dlod(tShadowMap, float4(sp - dx, 0, 0)).r > pd) va++;
-	if (tex2Dlod(tShadowMap, float4(sp + dx, 0, 0)).r > pd) va++;
-	if (tex2Dlod(tShadowMap, float4(sp - dy, 0, 0)).r > pd) va++;
-	if (tex2Dlod(tShadowMap, float4(sp + dy, 0, 0)).r > pd) va++;
-	return 1.0f - va * 0.25f;
+#endif
+	float cell = floor(P.w * 0.1f);
+	const float  t = P.w - cell * 10.0f;						// tan(fov/2)
+	const float  f = Dm.w;
+	float3 D = Dm.xyz;
+
+	// NORMAL-OFFSET (tpm = world texel per metre of light distance): push the receiver point
+	// ~2 map texels out along its surface normal - the ordinary-acne cure.
+	const float tpm = 2.0f * t / vLclShd.w;
+	posW += nrmW * (dstL * tpm * 2.0f);
+	const float3 rel = posW - P.xyz;
+
+#ifdef _LCLCUBE
+	if (cube) {
+		const float3 up  = -D;
+		const float3 aux = (abs(up.y) < 0.9f) ? float3(0, 1, 0) : float3(1, 0, 0);
+		const float3 X   = normalize(cross(up, aux));
+		const float3 Z   = cross(X, up);
+		const float3 a   = float3(dot(rel, X), dot(rel, up), dot(rel, Z));
+		const float3 aa  = abs(a);
+		if (aa.y >= aa.x && aa.y >= aa.z) {
+			if (a.y > 0.0f) return 1.0f;							// the sky face has no map: lit
+		}
+		else if (aa.x >= aa.z) { D = (a.x > 0.0f) ? X : -X; cell += (a.x > 0.0f) ? 1.0f : 2.0f; }
+		else                   { D = (a.z > 0.0f) ? Z : -Z; cell += (a.z > 0.0f) ? 3.0f : 4.0f; }
+	}
+#endif
+
+	const float3 upv = (abs(D.y) < 0.9f) ? float3(0, 1, 0) : float3(1, 0, 0);
+	const float3 R   = normalize(cross(D, upv));				// LookAtRH: x = cross(up, -D)
+	const float3 U   = cross(R, D);								//           y = cross(-D, x)
+	const float  d   = dot(rel, D);
+	if (d < 0.001f) return 1.0f;								// behind the light: lit
+	const float2 xy  = float2(dot(rel, R), dot(rel, U)) / (d * t);
+	if (abs(xy.x) > 1.0f || abs(xy.y) > 1.0f) return 1.0f;		// outside the map: lit
+	float2 sp = xy * float2(0.5f, -0.5f) + 0.5f;
+
+	// the receiver's depth as the caster wrote it (1 - z/w, near = ORO_LCL_NF x far), the relative
+	// bias, then the TEXEL-FOOTPRINT BIAS: at grazing incidence one texel's footprint on the
+	// receiving surface spans (texel / tan(incidence)) metres of ray depth, and the surface
+	// strobes against ITSELF within that span (the runway test's coherent black wedge - flown
+	// twice). Clear exactly that span, scaled by the PCF tap radius: near-nothing face-on, metres
+	// at grazing, always far smaller than a REAL caster's depth separation.
+	const float c  = ORO_LCL_NF / (1.0f - ORO_LCL_NF);
+	float pd = c * (f / d - 1.0f);
+	pd = pd * 1.012f + 0.0008f;
+	const float grz = sqrt(saturate(1.0f - nl * nl)) / max(nl, 0.05f);
+	pd += (tpm * 3.0f) * grz * (c * f) / max(dstL, 1.0f);
+
+	const float  col = cell - vLclShd.y * floor(cell / vLclShd.y);
+	const float  row = floor(cell / vLclShd.y);
+	const float2 uvo = float2(col * vLclAtl.x, vLclShd.z + row * vLclAtl.y);
+	const float2 ts  = vLclAtl.zw;
+	sp = clamp(uvo + sp * vLclAtl.xy, uvo + ts * 2.0f, uvo + vLclAtl.xy - ts * 2.0f);
+	float2 tx = sp / ts - 0.5f;
+	float2 fr = frac(tx);
+	float2 b  = (floor(tx) + 0.5f) * ts;
+	float s00 = (tex2Dlod(tShadowMap, float4(b, 0, 0)).r > pd) ? 1.0f : 0.0f;
+	float s10 = (tex2Dlod(tShadowMap, float4(b + float2(ts.x, 0), 0, 0)).r > pd) ? 1.0f : 0.0f;
+	float s01 = (tex2Dlod(tShadowMap, float4(b + float2(0, ts.y), 0, 0)).r > pd) ? 1.0f : 0.0f;
+	float s11 = (tex2Dlod(tShadowMap, float4(b + ts, 0, 0)).r > pd) ? 1.0f : 0.0f;
+	return 1.0f - lerp(lerp(s00, s10, fr.x), lerp(s01, s11, fr.x), fr.y);
 }
 
 
@@ -375,7 +427,7 @@ float SampleLocalShadow(float3 posW, float3 nrmW, float dstL, float nl)
 float OroCascTapT(float4 A, float tx, float2 uvo, float2 sc, float3 l, float3 ln, float2 g, float sn, float grz, float on)
 {
 	tx = max(tx, 1.0e-6f);
-	float3 p  = l + ln * (0.5f * tx * sn);
+	float3 p  = l + ln * (vCascBasis[2].w * tx * sn);                  // the normal offset: ShadowCascadeOffset texels x sin (the moire fix - see D3D9Client.fx)
 	float  invR = 2.0f * vCascAtlas.x / (tx * sc.x);
 	float2 sp = (p.xy - A.xy) * (invR * 0.5f) + 0.5f;
 	float  z  = (p.z - A.z) * A.w;
@@ -395,11 +447,12 @@ float OroCascTapT(float4 A, float tx, float2 uvo, float2 sc, float3 l, float3 ln
 	return 1.0f - lerp(lerp(s00, s10, fr.x), lerp(s01, s11, fr.x), fr.y);
 }
 
-// the wide tent for the coarse slots - see OroCascTapCW in D3D9Client.fx
+// the wide tent for the coarse slots (Soft far shadows; the mesh family has no tent - its
+// register budget - so the terms are documented on OroCascTapC in D3D9Client.fx)
 float OroCascTapWT(float4 A, float tx, float2 uvo, float2 sc, float3 l, float3 ln, float2 g, float sn, float grz, float on)
 {
 	tx = max(tx, 1.0e-6f);
-	float3 p  = l + ln * (0.75f * tx * sn);
+	float3 p  = l + ln * (vCascBasis[2].w * 1.5f * tx * sn);           // the tent reaches 2.5 texels, so 1.5x the crisp tap's offset (the old 0.75 : 0.5)
 	float  invR = 2.0f * vCascAtlas.x / (tx * sc.x);
 	float2 sp = (p.xy - A.xy) * (invR * 0.5f) + 0.5f;
 	float  z  = (p.z - A.z) * A.w;
@@ -435,8 +488,14 @@ float OroCascadeShadowT(float3 posW, float3 nrmW, float3 toSun)
 	float3 ln = float3(dot(nrmW, U), dot(nrmW, V), dot(nrmW, L));
 	float  nl = saturate(dot(nrmW, toSun));
 	float  sn = sqrt(saturate(1.0f - nl * nl));
-	float  grz = min(sn / max(nl, 0.05f), 4.0f);
-	float2 g  = clamp(ln.xy / max(nl, 0.15f), -6.0f, 6.0f);
+	// the receiver plane's depth slope, ONE number (2026-09-13, the moire fix - the mesh
+	// copy in D3D9Client.fx tells the story): the true tangent, its clamp
+	// (ShadowCascadeSlope; a literal 4 here until today, while the slope vector took its own
+	// floor 0.15 and clamp 6 per component), and the clamped tangent pointed along the
+	// normal's shadow in the light plane
+	float  tn  = sn / max(nl, 0.05f);
+	float  grz = min(tn, vCascTx[2].y);
+	float2 g   = ln.xy * (grz / max(sn, 1.0e-6f));
 	// the cascade by distance: 1-3 full-size along the top row, 4-5 half-size on the second
 	const float2 scF = float2(1.0f / 3.0f, 0.5f), scH = float2(1.0f / 6.0f, 0.25f);
 	float4 A = vCascA[1]; float tx = vCascTx[0].y; float si = 1.0f;
@@ -457,7 +516,12 @@ float OroCascadeShadowT(float3 posW, float3 nrmW, float3 toSun)
 	float2 sp0 = (l.xy - vCascA[0].xy) * (vCascAtlas.x * 6.0f / max(vCascTx[0].x, 1.0e-9f)) + 0.5f;
 	float  z0  = (l.z - vCascA[0].z) * vCascA[0].w;
 	float  in0 = (all(sp0 > 0.0f) && all(sp0 < 1.0f) && z0 > 0.0f && z0 < 1.0f) ? 1.0f : 0.0f;
-	if (vCascBasis[0].w > 3.5f) return (in0 > 0.5f) ? 0.15f : 0.15f + 0.17f * si;   // INSTRUMENT: slot bands
+	// INSTRUMENT: ShadowDebug 4 = the slot bands; 5 = THE CLAMP (black where the true slope
+	// exceeds ShadowCascadeSlope, half-dark past half of it, the real shadow elsewhere)
+	if (vCascBasis[0].w > 3.5f) {
+		if (vCascBasis[0].w > 4.0f) return lit * ((tn > vCascTx[2].y) ? 0.0f : ((tn > 0.5f * vCascTx[2].y) ? 0.5f : 1.0f));
+		return (in0 > 0.5f) ? 0.15f : 0.15f + 0.17f * si;
+	}
 	return lit;
 }
 
@@ -512,15 +576,18 @@ void LocalLights(
 	dif = saturate(dif);
 	dif *= (att * spt);
 
-	// ORO patch (z3): the shadow-mapped slot loses its light behind a caster. No
-	// dynamic register indexing in ps_3_0, so the slot picks through a select mask;
-	// the mask also fishes out the slot's light distance for the normal-offset.
-	if (vLShd.x > -0.5f) {
-		float4 sel = float4(abs(vLShd.x - 0.0f) < 0.5f, abs(vLShd.x - 1.0f) < 0.5f,
-		                    abs(vLShd.x - 2.0f) < 0.5f, abs(vLShd.x - 3.0f) < 0.5f);
-		float3 pK = p[0]*sel.x + p[1]*sel.y + p[2]*sel.z + p[3]*sel.w;
-		float  shd = SampleLocalShadow(posW, nrmW, dot(dst, sel), dot(-pK, nrmW));
-		dif *= lerp(float4(1, 1, 1, 1), shd.xxxx, sel);
+	// ORO patch (z3) / (ah) step 4: every light of this tile that owns a shadow map loses its
+	// light behind a caster; the index rides the light's Falloff lane (Surfmgr2 writes it,
+	// 0 = none). Branches on constants - coherent, cheap for the tile no shadowed light reaches.
+	{
+		const float4 sidx = float4(Lights.param[0][Falloff], Lights.param[1][Falloff], Lights.param[2][Falloff], Lights.param[3][Falloff]);
+		[branch] if (vLclShd.x > 0.5f && any(sidx > 0.5f)) {
+			float4 m = float4(1, 1, 1, 1);
+			[unroll] for (i = 0; i < 4; i++) {
+				[branch] if (sidx[i] > 0.5f) m[i] = SampleLocalShadow(posW, nrmW, sidx[i], dst[i], dot(-p[i], nrmW));
+			}
+			dif *= m;
+		}
 	}
 
 	[unroll] for (i = 0; i < 4; i++) diff_out += Lights.diffuse[i].rgb * dif[i];
@@ -1123,7 +1190,12 @@ float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
 	// the atmosphere exactly like dry ground - putting it after would have made distant
 	// wet terrain punch through the aerial perspective. Exactly zero at gWet 0, so stock
 	// content cannot move.
-	if (gWet > 0.001f) {
+	// ORO 2026-09-10: ALSO OPEN OVER WATER, RAIN OR NOT - gWetGrainPrm.w is the addon's
+	// "water under the focus vessel" times the camera-height fade (Scene.cpp). Every term
+	// inside is multiplied by gWet or pud, so on dry-weather water only the MIRROR moves
+	// (see rStr below) - the vessel's image in the sea, with the same ripple and blur the
+	// puddles use. Uniform-only condition: a standalone ps_3_0 shader, no bool register cost.
+	if (gWet > 0.001f || gWetGrainPrm.w > 0.001f) {
 		// ORO patch (s) part 7: STANDING POOLS ON THE TERRAIN - his brief, verbatim:
 		// patches all around the vessel, different sizes, that STAY IN PLACE as the
 		// vessel moves, new ones appearing ahead and old ones dropping behind. All of
@@ -1182,6 +1254,11 @@ float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
 		float  gn  = 0.62f * OroGrainNoise(guv, GNq)
 		           + 0.38f * OroGrainNoise(guv * 2.0f, GNq * 2.0f);
 		float  gran = 1.0f - saturate(0.85f * gWetGrainPrm.x) * smoothstep(0.52f, 0.78f, gn);
+		// ORO 2026-09-10, his call: THE GRAIN IS A POOL TEXTURE AND HAS NO BUSINESS ON OPEN
+		// WATER. Pools do not form there (the A6 gate below), so broken-water speckle over a
+		// sea reflection is a puddle's look applied to the wrong surface. fMask is the stock
+		// water mask - 1 on sea - so this is exactly "no grain where there are no pools".
+		gran = lerp(gran, 1.0f, fMask);
 	#undef QS
 		float  pud = saturate(p1 * 1.30f - 0.16f + 0.30f * gWet + p3 * 0.35f)
 		           * saturate(p2 * 1.10f + 0.35f + 0.25f * gWet);
@@ -1194,7 +1271,26 @@ float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
 		// full by z=0, so the old bottom-of-range look is exactly the new 0.1 and the
 		// first twentieth of the travel fades the pools in instead of popping them.
 		pud *= saturate(gWetSwimPrm.z * 10.0f + 1.0f);
-		pud *= exp(-dst / (90.0f + 780.0f * gWetSwimPrm.w * gWetSwimPrm.w));
+		// ORO 2026-09-10 (triage A6, Buck Rogers: "puddles look a bit weird on water and
+		// especially on uneven terrain"): NO STANDING WATER ON WATER - fMask is the stock
+		// specular/water mask (1 on sea, the channel the ocean's own specular reads) -
+		// and none where the tile leans more than ~6 deg off the sphere normal, full
+		// pools again under ~2 deg. nvrW is the MESH normal, not the normal-mapped one,
+		// so micro-relief does not eat the pools. There is no vegetation mask: a flat
+		// forest still pools, and Pool size is the control there.
+		// ⚠️ NO NEW LITERALS HERE. This shader sits ON the ps_3_0 constant ceiling under
+		// the Earth + dev-tools configuration (d3dxps: c223 of 224 before this line), and
+		// the obvious smoothstep(0.9945, 0.9994, ..) put it over (X4507, caught by
+		// fxccheck). The gate is built from constants the shader already carries -
+		// 780 (the pool-reach coefficient below) and 1.6 (the pool contrast above):
+		// cos^780 x 1.6, saturated, is 1.0 to ~2 deg, 0.55 at 3 deg, 0.24 at 4 deg and
+		// ~0 by 6 deg - the same curve, at zero registers.
+		pud *= (1.0f - fMask) * saturate(pow(saturate(dot(nvrW, vPlN)), 780.0f) * 1.6f);
+		// ⚠️ HOISTED (2026-09-11): the damp FILM needs a distance fade too - see the skyF
+		// note below - and reusing this exact expression costs no constant in a shader that
+		// sits at c223 of 224.
+		float  reachF = exp(-dst / (90.0f + 780.0f * gWetSwimPrm.w * gWetSwimPrm.w));
+		pud *= reachF;
 
 		cTex.rgb *= saturate(lerp(1.0f, 1.0f - 0.494f * gWetDark, gWet));   // recalibrated x2: full track = old 0..1.3
 		cTex.rgb *= saturate(lerp(1.0f, 1.0f - 0.85f  * gWetDark, pud));    // standing water, darker still
@@ -1212,7 +1308,21 @@ float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
 		{
 			float3 cSkyT = float3(0.42f, 0.45f, 0.49f) * saturate(cAmb.a * 1.3f)
 			             * (1.0f + gStorm * 0.35f);
-			float  skyF = saturate(saturate((0.30f + 0.70f * fresW) * gWet) * 0.60f
+			// ⚠️ THE DAMP FILM IS A NEAR-FIELD EFFECT AND NOW FADES LIKE ONE (2026-09-11,
+			// his report: "the mountains in the distance are a light shade of gray that
+			// looks wrong"). It had NO distance term - only the pools did - and at twenty
+			// kilometres the terrain LOD is coarse enough that every normal is essentially
+			// the sphere normal, so a near-horizontal view drives fresW to 1 on every
+			// distant pixel and the whole ridge took the full 60% of cSkyT: a flat pale
+			// band the colour of the film. Physically it is the wrong term out there
+			// anyway - a specular sheen you cannot resolve, on ground whose colour is
+			// aerial perspective's to decide. PRE-EXISTING, not introduced by the runway
+			// work; it surfaced because that work stopped the runway dominating the frame.
+			// The fade is the pools' own reach to the FOURTH ROOT - four times their
+			// e-fold, ~2.2 km at his settings - so the near field he approved does not
+			// move (98% at 50 m, 80% at 500 m) and the horizon returns to the fog.
+			float  filmF = sqrt(sqrt(reachF));
+			float  skyF = saturate(saturate((0.30f + 0.70f * fresW) * gWet) * 0.60f * filmF
 			                     + (0.55f + 0.45f * fresW) * pud * 0.80f * gran);
 			cTex.rgb = lerp(cTex.rgb, cSkyT, skyF);
 
@@ -1266,8 +1376,11 @@ float4 TerrainPS(float4 sc : VPOS, TileVS frg) : COLOR
 				            + tex2D(tWetRefl, ruv + float2(0, -smr * 0.6f));
 				cVes = lerp(cVes, cVes * 0.4f + wide * 0.2f, saturate(blur));
 			}
+			// ORO 2026-09-10: + fMask x gWetGrainPrm.w - the WATER term: the stock water mask
+			// (1 on sea) times the addon's water-under-the-vessel strength, so the sea
+			// mirrors the ship with no rain at all. No new register, no new literal.
 			float  rStr = cVes.a * saturate(0.30f + 2.2f * fresW)
-			            * saturate(0.70f * gWet + 1.25f * pud) * 0.85f * gWetReflPrm.z * gran;
+			            * saturate(0.70f * gWet + 1.25f * pud + fMask * gWetGrainPrm.w) * 0.85f * gWetReflPrm.z * gran;
 			cTex.rgb = lerp(cTex.rgb, cVes.rgb, saturate(rStr));
 		}
 	}

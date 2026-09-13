@@ -45,15 +45,16 @@ struct Sun
 	float3 Inscatter;		// Amount of incattered light from haze
 };
 
+// ORO patch (ah) 2026-09-08: FOUR float4 per light (was six: int type + float dst2 padded
+// to a register, float3s each padded). Nothing in the shaders read dst2, range, falloff or
+// diffuse.a; the three scalars that ARE read ride the .w lanes. Byte layout is mirrored by
+// LightStruct in D3D9Util.h. Measured with tools/fxeff: 8 lights 163 -> 139 registers.
 struct Light
 {
-	int      type;       	   /* Is is spotlight */
-	float    dst2;			   /* Camera-Light Emitter distance squared */
-	float4   diffuse;          /* diffuse color of light */
-	float3   position;         /* position in world space */
-	float3   direction;        /* direction in world space */
-	float3   attenuation;      /* Attenuation */
-	float4   param;            /* range, falloff, theta, phi */
+	float4   position;         /* xyz world space, w = cos(phi/2) - the spot's outer cone */
+	float4   direction;        /* xyz world space, w = theta scale 1/(cos(u/2)-cos(p/2)) */
+	float4   attenuation;      /* xyz a0 a1 a2, w = type (0 point, 1 spot) */
+	float4   diffuse;          /* rgb colour x intensity; a = the light's spot shadow map, cell + 1 (0 = none) - ORO patch (ah) step 4 */
 };
 
 // Must match with counterpart in D3D9Effect.h
@@ -158,6 +159,18 @@ uniform extern float     gSurfWet;        // ORO patch (s): ground wetness, 0..1
 uniform extern float     gWetTime;        // ORO patch (s): real-time sparkle clock, wraps hourly
 uniform extern float     gWetGlint;       // ORO patch (s) part 5: hull glint gain, 0..2
 uniform extern texture   gWetReflTex;     // ORO patch (s) part 6: the wet-ground planar mirror
+// ORO patch (aj) 2026-09-12: PLANETARY RINGS. Set per ringed planet in vPlanet::Render's
+// ring bracket and CLEARED after it (gRingPrm.x = 0), so no other planet's pass reads them.
+uniform extern float4    gRingPrm;        // blend (0 = stock), optical-depth trim, lit brightness, backlit glow
+uniform extern float4    gRingRad;        // irad [m], orad [m], 1/(orad-irad), 0
+uniform extern float4    gRingShd;        // ring plane normal (world) xyz, 0 - for the planet's ring shadow
+uniform extern texture   gRingProf;       // the profile: N x 1, LINEAR in radius, RGB brightness, A = 255*sqrt(tau/5)
+uniform extern float4    gRingPrm2;       // ORO round 2, THE CLOSE-UP: contrast (amplitude), along-track offset INTEGER, radial offset INTEGER, along-track offset FRACTION (cells)
+uniform extern float4    gRingPrm3;       // ORO round 2: cells/m along track, cells/m radial, radial offset FRACTION, detail (the fade's reach: 1 = a 4 px rule, 2 = 2 px, 0 = off)
+uniform extern float4    gRingPrm4;       // ORO round 2: relief (the density field read as height - its slope tilts the lit normal), 0, 0, 0
+uniform extern float4    gRingAxR;        // ORO round 2: the camera's radial direction in the ring plane (world) xyz, 0
+uniform extern float4    gRingAxT;        // ORO round 2: the camera's along-track direction in the ring plane (world) xyz, 0
+uniform extern float4    gRingCut;        // ORO round 2: the seam between the planet pass and the near-field draw - camera forward (world) xyz, w = the cut depth [m]: > 0 in the planet pass (fade IN past it), < 0 in the near-field draw (fade OUT past |w|), 0 = no seam
 uniform extern float4    gWetReflPrm;     // ORO patch (s) part 6: 1/W, 1/H, gain, live
 uniform extern float4    gWetSwimPrm = {1, 1, 1, 1};  // ORO patch (s): swim amp, swim rate, pool size, pool reach (user sliders)
 uniform extern float4    gWetGrainPrm = {1, 1, 0, 0};  // ORO patch (s) part 7: grain opacity, grain size (user sliders)
@@ -296,11 +309,14 @@ uniform extern float     gOroDbg = 0.0f;   // ORO patch (ab) INSTRUMENT: ShadowD
 // pushed uv rect each, and so was a three-vector basis). THIS FAMILY SEES SEVEN SLOTS,
 // in ITS OWN ORDER: 0 = the focus box, 1-3 = the cascades to 2 km (a hull or a hangar
 // beyond that is pixels), 4-6 = the three hull boxes (Scene.cpp remaps them on push).
-// gCascBasis = U, V across the light (U.w carries ShadowDebug; L, the direction the
-// light travels, is -U x V - LookAt's axes are orthonormal and right-handed);
-// gCascA[k] = (centre u, centre v, near-plane depth, 1/depth range); gCascTx = the seven
-// texels in metres, four to a register (a dead slot has texel 0); gCascSplit = the split
-// distances; gCascAtlas = (1/atlas W, 1/atlas H, ON, far). The slots' uv rectangles are
+// gCascBasis = U, V across the light (L, the direction the light travels, is -U x V -
+// LookAt's axes are orthonormal and right-handed; the debug mode comes through gOroDbg
+// here, and V.w carries the NORMAL OFFSET in texels - ShadowCascadeOffset, the moire fix
+// of 2026-09-13 - because this family never reads the soft-far switch the terrain keeps
+// there); gCascA[k] = (centre u, centre v, near-plane depth, 1/depth range); gCascTx =
+// the seven texels in metres, four to a register (a dead slot has texel 0; the eighth
+// lane, gCascTx[1].w, is the SLOPE CLAMP - ShadowCascadeSlope, the same fix); gCascSplit
+// = the split distances; gCascAtlas = (1/atlas W, 1/atlas H, ON, far). The slots' uv rectangles are
 // FIXED by the atlas layout (Scene.cpp's table: cascades 1-3 full-size along the top
 // row, the hull boxes and cascades 4-5 half-size along the second) and are arithmetic
 // in the lookups. Scene.cpp fills them after the pass and zeroes ON at frame top and in
@@ -315,6 +331,22 @@ uniform extern texture   gCascMap;
 // runway/taxiway light sprites, set by vBase around ITS draws only (1 = stock, and 1
 // for every vessel). Past 1 the excess rides the fp16 chain into the bloom.
 uniform extern float     gBaseGlow = 1.0f;
+// ORO 2026-09-10 (triage A5, Buck Rogers's report): 1 while vBase draws its own structures,
+// 0 for every vessel. WetSparkle keys its lattice on BASE-LOCAL METRES when this is set,
+// so a runway, a pad and a hangar wall all get the same drops per square metre whatever
+// their texture mapping. Set and cleared in the same three brackets as gBaseGlow.
+uniform extern float     gBaseLocal = 0.0f;
+// ORO 2026-09-11: 1 while vBase draws its BELOW-SHADOW surfaces - the runway, the pads, the
+// taxiways - and 0 for everything else INCLUDING a base's buildings, which are not ground.
+// Those surfaces render through the VESSEL shader path, so without this they take a HULL's
+// wet darkening (a flat 0.66) while the apron a metre away takes the ground's (~0.50 at
+// Wet dark 1) - and a runway that stays lighter than the dirt beside it reads as dry.
+// ⚠️ IT IS CONSUMED INSIDE THE SHADER, BEFORE FOG, and that is the point: the first attempt
+// did this as an overlay pass that MODULATED the finished pixel, which at distance darkened
+// the FOG itself and left the runways as hard black shapes that never blended into the murk
+// (his zoomed-out Mojave shots). A multiply applied after aerial perspective can never be
+// tuned right; applied to the albedo it is correct by construction.
+uniform extern float     gBaseGround = 0.0f;
 // ORO patch (ac) part 2: the HALO gain - a lamp in fog is not brighter, it is a soft
 // aureole whose size grows with the optical depth between it and the eye (BeaconArray.fx).
 uniform extern float     gBaseHalo = 1.0f;
@@ -673,6 +705,20 @@ sampler RingS = sampler_state       // Planetary rings sampler
 	AddressV = WRAP;
 };
 
+// ORO patch (aj): the ring PROFILE sampler. Its own texture, not gTex0 - Planet0S binds
+// gTex0 too, and the planet pass samples this for the ring's shadow while gTex0 is the
+// globe. CLAMP: a real profile ends transparent at both edges and the shaders gate on
+// irad..orad besides; WRAP would smear the outer edge onto the inner.
+sampler RingProfS = sampler_state
+{
+	Texture = <gRingProf>;
+	MinFilter = LINEAR;
+	MagFilter = LINEAR;
+	MipFilter = LINEAR;
+	AddressU = CLAMP;
+	AddressV = CLAMP;
+};
+
 sampler EnvMapAS = sampler_state
 {
 	Texture = <gEnvMapA>;
@@ -950,10 +996,25 @@ float4 SpotTechPS(SimpleVS frg) : COLOR
 // Distance-aware: a drop cell is fixed in mesh UV, so up close one blob covers many
 // pixels and reads as a headlight. Near the camera the blob TIGHTENS and DIMS toward
 // fine speckle; the far look is unchanged.
-float WetSparkle(float2 tex0, float3 nrmW, float dist)
+float WetSparkle(float2 tex0, float3 nrmW, float3 camW)
 {
 	if (gSurfWet < 0.001f) return 0.0f;
-	float2 uvS  = tex0 * 34.0f;
+	float  dist = length(camW);
+	// ORO 2026-09-10 (triage A5, Buck Rogers: "the rain hit on buildings is mapped to the
+	// texture resolution"): on BASE OBJECTS the lattice keys on base-local METRES, not on
+	// texture coordinates. A runway texture stretched over its length, a pad at one cycle
+	// per pad and an untextured wall (which still carries UVs) all gave different drop
+	// densities. Two cells per metre now, everywhere on a base - the density a
+	// DeltaGlider's hull gets from its own UVs. TRIPLANAR on the dominant axis of the
+	// base-local normal, so a wall gets the lattice across its face rather than vertical
+	// stripes. gW is this draw's world matrix in the row-vector convention
+	// (posW = posL * R + T), so (posW - T) * R^T is base-local; camW is -posW. The blend
+	// is lerp(.., gBaseLocal) with gBaseLocal 0 on every vessel: lerp(a, b, 0) is exactly
+	// a, so hulls render bit for bit as before.
+	float3 posL = mul(-camW - gW[3].xyz, transpose((float3x3)gW));
+	float3 an   = abs(mul(nrmW, transpose((float3x3)gW)));
+	float2 uvB  = (an.y >= an.x && an.y >= an.z) ? posL.xz : ((an.x >= an.z) ? posL.zy : posL.xy);
+	float2 uvS  = lerp(tex0 * 34.0f, uvB * 2.0f, gBaseLocal);
 	float2 cell = floor(uvS);
 	float  hc   = frac(sin(dot(cell, float2(127.1f, 311.7f))) * 43758.5453f);
 	float  uu   = gWetTime * (1.0f / 0.55f) + hc;      // the splash-ring cadence
@@ -991,8 +1052,21 @@ float WetSparkle(float2 tex0, float3 nrmW, float dist)
 // slope term that used to be a blind bias (2.5 texels x tan - 24 m at a 2 m texel under
 // a 20-degree sun, which is what ate a landed ShuttleA's 4 m of clearance on his
 // round-6 flight) is exact now; what remains is under a texel, for curvature and the
-// rasteriser. Half a texel of normal offset, grazing only. Bilinear PCF: the four
-// texels round the sample, each compared, weighted by the sub-texel position.
+// rasteriser. The NORMAL OFFSET (2026-09-13, THE MOIRE FIX - the receiver is moved
+// ShadowCascadeOffset texels x sin(grazing) along its normal before the lookup): the
+// offset point sits nearer the light than its own surface by offset / cos, i.e. by
+// offset x TAN texels of depth - the SAME growth the acne has. The acne was this: the
+// slope g and the bias both CLAMP (at tan 4, 76 deg, until today), and past the clamp
+// an uphill tap's true depth runs away from the extrapolated plane by (tan - clamp)
+// texels per texel of reach; half a texel of sin-scaled offset (the old value) plus
+// 2.5 texels of bias lost that race past ~84 deg and the receiver shadowed ITSELF - a
+// fine hatch that beat against the pixel grid (his DG roll in orbit, 2026-09-13; a
+// hangar wall and terrain at a low sun the same way). At 1.5 texels the offset's margin
+// (1.5 tan) outruns the worst tap (1.41 (tan - clamp)) for ANY tan and ANY clamp, and
+// it survives ten degrees of smooth-vs-flat normal disagreement, which the blind bias
+// never could. The cost is bounded: the LOOKUP moves at most 1.5 texels sideways
+// (offset x sin^2), never a depth push - contact shadows stay attached. Bilinear PCF:
+// the four texels round the sample, each compared, weighted by the sub-texel position.
 // WARNING - THIS FAMILY IS COMPILED BY THE LEGACY EFFECT FRONT END (fx_2_0), which
 // packs constants far worse than fxc's standalone compiler and spends them per INLINED
 // copy of a lookup: round 6 sat at c220 of 224 under his effect set, and every extra
@@ -1001,7 +1075,7 @@ float WetSparkle(float2 tex0, float3 nrmW, float dist)
 float OroCascTapC(float4 A, float tx, float2 uvo, float2 sc, float3 l, float3 ln, float2 g, float sn, float grz, float on)
 {
 	tx = max(tx, 1.0e-6f);
-	float3 p  = l + ln * (0.5f * tx * sn);
+	float3 p  = l + ln * (gCascBasis[1].w * tx * sn);                  // the normal offset: ShadowCascadeOffset texels x sin
 	float  invR = 2.0f * gCascAtlas.x / (tx * sc.x);                   // r = texel x slot size / 2, slot size = sc.x x W
 	float2 sp = (p.xy - A.xy) * (invR * 0.5f) + 0.5f;
 	float  z  = (p.z - A.z) * A.w;
@@ -1037,8 +1111,15 @@ float OroCascadeShadow(float3 posW, float3 nrmW, float3 toSun)
 	float3 ln = float3(dot(nrmW, U), dot(nrmW, V), dot(nrmW, L));
 	float  nl = saturate(dot(nrmW, toSun));
 	float  sn = sqrt(saturate(1.0f - nl * nl));
-	float  grz = min(sn / max(nl, 0.05f), 4.0f);
-	float2 g  = clamp(ln.xy / max(nl, 0.05f), -4.0f, 4.0f);           // the receiver plane's depth slope (N.L = -nl)
+	// the receiver plane's depth slope, ONE number (2026-09-13): tn is the true tangent of
+	// the grazing angle (20 at the nl floor), grz its clamp (ShadowCascadeSlope - it was a
+	// literal 4 until the moire fix, and the slope vector g was clamped per COMPONENT to the
+	// same 4, so the two "same" numbers disagreed by up to 41% on the diagonal), and g is
+	// that clamped tangent pointed along the normal's shadow in the light plane (N.L = -nl;
+	// |ln.xy| = sn for a receiver facing the light, so g = ln.xy x grz / sn has length grz)
+	float  tn  = sn / max(nl, 0.05f);
+	float  grz = min(tn, gCascTx[1].w);
+	float2 g   = ln.xy * (grz / max(sn, 1.0e-6f));
 	float  d  = length(posW);
 	float  on = gCascAtlas.z * ((d <= gCascSplit.z) ? 1.0f : 0.0f);   // the mesh family's cascades end at slot 3
 	// the cascade by distance: slots 1-3 sit full-size along the atlas' top row
@@ -1062,9 +1143,16 @@ float OroCascadeShadow(float3 posW, float3 nrmW, float3 toSun)
 	float  i6  = OroCascIn(gCascA[6], gCascTx[1].z, l);
 	if (i6 > 0.5f && inh < 0.5f) { Ah = gCascA[6]; th = gCascTx[1].z; xh = 5.0f; inh = 1.0f; }
 	lit = min(lit, OroCascTapC(Ah, th, float2(xh / 6.0f, 0.5f), float2(1.0f / 6.0f, 0.25f), l, ln, g, sn, grz, gCascAtlas.z * inh));
-	// INSTRUMENT (ShadowDebug 4): the slot bands, folded in ARITHMETICALLY
+	// INSTRUMENT (ShadowDebug 4): the slot bands; (ShadowDebug 5): THE CLAMP - a receiver
+	// whose true slope tn exceeds ShadowCascadeSlope goes BLACK, one past half of it goes
+	// half-dark, everything else keeps its real shadow. Set the slope key to 4 with this
+	// mode and the black is exactly the set of receivers the old clamp was failing on.
+	// Both folded in ARITHMETICALLY (no bool register: 4.0f is a literal the effect holds).
 	float band = (inh > 0.5f) ? 0.15f : 0.15f + 0.17f * si;
-	return lerp(lit, band, saturate(gOroDbg - 3.5f));
+	float bite = (tn > gCascTx[1].w) ? 0.0f : ((tn > 0.5f * gCascTx[1].w) ? 0.5f : 1.0f);
+	float m4 = saturate(gOroDbg - 3.5f), m5 = saturate(gOroDbg - 4.0f);
+	lit = lerp(lit, band, m4 - m5);
+	return lerp(lit, lit * bite, m5);
 }
 
 #include "Particle.fx"

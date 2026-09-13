@@ -85,12 +85,17 @@ void D3D9Config::Reset ()
 	PlanetTileLoadFlags	= 0x3;
 	TerrainShadowing	= 2;
 	LocalLightShadows	= 1;			// ORO patch (z3): local spot lights cast real shadows by default
+	LocalLightShadowMaps = 4;		// ORO patch (ah) step 4: four spot lights cast at once by default
+	LocalLightShadowPoint = 1;		// ORO patch (ah) step 5: point lights get an aimed map by default
 	ShadowDepthTol		= 1.0;			// ORO patch (ab): HIS found value (Brighton Beach, 2026-09-05) - near a hard test with a metre of slack
 	ShadowDepthTolK		= 0.001;		// ORO patch (ab): per metre of distance - twice the depth buffer's fp16 step (0.05% of distance), the quantisation floor
 	ShadowDebug			= 0;			// ORO patch (ab) INSTRUMENT: off
+	LocalLightSelfShadow = 0;		// ORO patch (ah) step 2 DIAGNOSTIC: off
 	ShadowCascadeSize	= 2048;			// ORO patch (ae)
 	ShadowCascadeFar	= 30000.0;		// ORO patch (ae)
 	ShadowCascadeSoft	= 1;			// ORO patch (ae)
+	ShadowCascadeSlope	= 16.0;			// ORO patch (ae) moire fix: the slope clamp, tan 16 = 86 deg (was a literal 4 = 76 deg)
+	ShadowCascadeOffset	= 1.5;			// ORO patch (ae) moire fix: the normal offset in texels x sin (was 0.5)
 	ParticleLight		= 2;			// ORO patch (x): brightness + colour by default
 	ParticleShadow		= 1.0;			// ORO patch (x): stock shadow strength by default
 	ParticleTintLead	= 0.10;			// ORO patch (x): the smoke runs ~6 deg of sun ahead of the hull
@@ -133,7 +138,9 @@ int D3D9Config::MaxLights()
 {
 	if (LightConfig == 0) return 1;
 	if (LightConfig <= 2) return 4;
-	return 8;
+	if (LightConfig <= 4) return 8;
+	if (LightConfig <= 6) return 12;	// ORO patch (ah) step 3
+	return 16;
 }
 
 bool D3D9Config::ReadParams ()
@@ -171,9 +178,14 @@ bool D3D9Config::ReadParams ()
 	if (oapiReadItem_int   (hFile, (char*)"EnableGlass", i))			EnableGlass = max(0, min(1, i));
 	if (oapiReadItem_int   (hFile, (char*)"TerrainShadowing", i))		TerrainShadowing = max(0, min(3, i));	// ORO patch (ae): 3 = cascaded
 	if (oapiReadItem_int   (hFile, (char*)"LocalLightShadows", i))		LocalLightShadows = max(0, min(1, i));
+	if (oapiReadItem_int   (hFile, (char*)"LocalLightShadowMaps", i))	LocalLightShadowMaps = (i < 2) ? 1 : (i < 4) ? 2 : (i < 6) ? 4 : 6;	// ORO patch (ah) step 4: snaps to the combo's list
+	if (oapiReadItem_int   (hFile, (char*)"LocalLightShadowPoint", i))	LocalLightShadowPoint = max(0, min(2, i));	// ORO patch (ah) step 5
 	if (oapiReadItem_float (hFile, (char*)"ShadowDepthTol", d))		ShadowDepthTol = max(0.0, min(1000.0, d));
 	if (oapiReadItem_float (hFile, (char*)"ShadowDepthTolK", d))		ShadowDepthTolK = max(0.0, min(0.5, d));
-	if (oapiReadItem_int   (hFile, (char*)"ShadowDebug", i))		ShadowDebug = max(0, min(4, i));	// ORO patch (ae): 3 = dump the cascade atlas, 4 = + colour receivers by slot
+	if (oapiReadItem_int   (hFile, (char*)"ShadowDebug", i))		ShadowDebug = max(0, min(5, i));	// ORO patch (ae): 3 = dump the cascade atlas, 4 = + colour receivers by slot, 5 = + black the receivers past the slope clamp
+	if (oapiReadItem_float (hFile, (char*)"ShadowCascadeSlope", d))	ShadowCascadeSlope = max(1.0, min(32.0, d));	// ORO patch (ae) moire fix
+	if (oapiReadItem_float (hFile, (char*)"ShadowCascadeOffset", d))	ShadowCascadeOffset = max(0.0, min(8.0, d));	// ORO patch (ae) moire fix
+	if (oapiReadItem_int   (hFile, (char*)"LocalLightSelfShadow", i))	LocalLightSelfShadow = max(0, min(1, i));	// ORO patch (ah) step 2 diagnostic
 	if (oapiReadItem_int   (hFile, (char*)"ShadowCascadeSize", i))		ShadowCascadeSize = max(512, min(4096, i));
 	if (oapiReadItem_float (hFile, (char*)"ShadowCascadeFar", d))		ShadowCascadeFar = max(1000.0, min(60000.0, d));
 	if (oapiReadItem_int   (hFile, (char*)"ShadowCascadeSoft", i))		ShadowCascadeSoft = max(0, min(1, i));
@@ -190,8 +202,8 @@ bool D3D9Config::ReadParams ()
 	if (oapiReadItem_float (hFile, (char*)"StereoConvergence", d))		Convergence = max(0.05, min(1.0, d));
 	if (oapiReadItem_int   (hFile, (char*)"DebugLvl", i))				DebugLvl = i;
 	if (oapiReadItem_float (hFile, (char*)"VCNearPlane", d))			VCNearPlane = max(-1.0, min(1.0, d));
-	if (oapiReadItem_int   (hFile, (char*)"LightCongiguration", i))	LightConfig = max(min(4, i), 0); // Old typo stored?
-	if (oapiReadItem_int   (hFile, (char*)"LightConfiguration", i))	LightConfig = max(min(4, i), 0); // ...this will override it anyhow
+	if (oapiReadItem_int   (hFile, (char*)"LightCongiguration", i))	LightConfig = max(min(8, i), 0); // Old typo stored?  (ORO patch (ah) step 3: 5-8 = 12x/16x)
+	if (oapiReadItem_int   (hFile, (char*)"LightConfiguration", i))	LightConfig = max(min(8, i), 0); // ...this will override it anyhow
 	if (oapiReadItem_int   (hFile, (char*)"DisableDrvMgm", i))			DisableDriverManagement = max(0, min(1, i));
 	if (oapiReadItem_int   (hFile, (char*)"NVPerfHUD", i))				NVPerfHUD = max(0, min(1, i));
 	if (oapiReadItem_int   (hFile, (char*)"DebugLineFontSize", i))		DebugFontSize = i;
@@ -204,7 +216,19 @@ bool D3D9Config::ReadParams ()
 	if (oapiReadItem_int   (hFile, (char*)"BlendMode", i))						BlendMode = max(0, min(2, i));
 	if (oapiReadItem_int   (hFile, (char*)"MicroBias", i))						MicroBias = max(0, min(10, i));
 	if (oapiReadItem_int   (hFile, (char*)"CloudMicro", i))					CloudMicro = max(0, min(1, i));
-	if (oapiReadItem_int   (hFile, (char*)"PostProcess", i))					PostProcess = max(0, min(2, i));
+	// ORO patch (ak) 2026-09-12: CLAMPED TO 0..1, was 0..2. PP_LENSFLARE (2) has been
+	// unreachable and inert since the 2024 client: SolarLiner's lens flare still ships -
+	// shaders/LensFlare.hlsl is deployed, Scene::GetSunScreenVisualState() is written and
+	// the manual documents the feature - but NOTHING calls either of them, and the only
+	// ImageProcessing ever constructed is LightBlur under PP_DEFAULT. Meanwhile the
+	// Launchpad combo carries just two rows, so a hand-set 2 could not survive a visit to
+	// that page: CB_SETCURSEL fails, CB_GETCURSEL returns CB_ERR, and the next OK wrote
+	// back -1 - which is truthy, so the post-process branch ran with pLightBlur NULL and
+	// the user was left with no bloom AND no flare. The same trap ShadowMapFilter 3/4
+	// already had. Anyone carrying a 2 now lands on Light glow, which is what they wanted.
+	// ORO draws its own lens flare (PSLensFlare) in the external views, tunable from the
+	// GOD RAYS page; the dead 2016 path stays here, unmodified, as a stock finding.
+	if (oapiReadItem_int   (hFile, (char*)"PostProcess", i))					PostProcess = max(0, min(1, i));
 	if (oapiReadItem_int   (hFile, (char*)"ShaderDebug", i))					ShaderDebug = max(0, min(1, i));
 	if (oapiReadItem_int   (hFile, (char*)"PresentLocation", i))				PresentLocation = max(0, min(1, i));
 	if (oapiReadItem_int   (hFile, (char*)"PlanetTileLoadFlags", i))			PlanetTileLoadFlags = max(1, min(3, i));
@@ -302,12 +326,17 @@ void D3D9Config::WriteParams ()
 	WP_INT("ShadowMapSize", ShadowMapSize);
 	WP_INT("TerrainShadowing", TerrainShadowing);
 	WP_INT("LocalLightShadows", LocalLightShadows);
+	WP_INT("LocalLightShadowMaps", LocalLightShadowMaps);
+	WP_INT("LocalLightShadowPoint", LocalLightShadowPoint);
 	WP_FLT("ShadowDepthTol", ShadowDepthTol);
 	WP_FLT("ShadowDepthTolK", ShadowDepthTolK);
 	WP_INT("ShadowDebug", ShadowDebug);
+	WP_INT("LocalLightSelfShadow", LocalLightSelfShadow);
 	WP_INT("ShadowCascadeSize", ShadowCascadeSize);
 	WP_FLT("ShadowCascadeFar", ShadowCascadeFar);
 	WP_INT("ShadowCascadeSoft", ShadowCascadeSoft);
+	WP_FLT("ShadowCascadeSlope", ShadowCascadeSlope);
+	WP_FLT("ShadowCascadeOffset", ShadowCascadeOffset);
 	WP_INT("ParticleLight", ParticleLight);
 	WP_FLT("ParticleShadow", ParticleShadow);
 	WP_FLT("ParticleTintLead", ParticleTintLead);
@@ -420,12 +449,17 @@ static void WriteParams_stock_disabled (D3D9Config*)
 	oapiWriteItem_int   (hFile, (char*)"ShadowMapSize", ShadowMapSize);
 	oapiWriteItem_int   (hFile, (char*)"TerrainShadowing", TerrainShadowing);
 	oapiWriteItem_int   (hFile, (char*)"LocalLightShadows", LocalLightShadows);
+	oapiWriteItem_int   (hFile, (char*)"LocalLightShadowMaps", LocalLightShadowMaps);
+	oapiWriteItem_int   (hFile, (char*)"LocalLightShadowPoint", LocalLightShadowPoint);
 	oapiWriteItem_float (hFile, (char*)"ShadowDepthTol", ShadowDepthTol);
 	oapiWriteItem_float (hFile, (char*)"ShadowDepthTolK", ShadowDepthTolK);
 	oapiWriteItem_int   (hFile, (char*)"ShadowDebug", ShadowDebug);
+	oapiWriteItem_int   (hFile, (char*)"LocalLightSelfShadow", LocalLightSelfShadow);
 	oapiWriteItem_int   (hFile, (char*)"ShadowCascadeSize", ShadowCascadeSize);
 	oapiWriteItem_float (hFile, (char*)"ShadowCascadeFar", ShadowCascadeFar);
 	oapiWriteItem_int   (hFile, (char*)"ShadowCascadeSoft", ShadowCascadeSoft);
+	oapiWriteItem_float (hFile, (char*)"ShadowCascadeSlope", ShadowCascadeSlope);
+	oapiWriteItem_float (hFile, (char*)"ShadowCascadeOffset", ShadowCascadeOffset);
 	oapiWriteItem_int   (hFile, (char*)"ParticleLight", ParticleLight);
 	oapiWriteItem_float (hFile, (char*)"ParticleShadow", ParticleShadow);
 	oapiWriteItem_float (hFile, (char*)"ParticleTintLead", ParticleTintLead);

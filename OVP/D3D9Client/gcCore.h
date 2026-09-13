@@ -673,6 +673,70 @@ ote A taste knob on the albedo term only - the mirror and the puddle mask ride
 	gc_interface void SetVCNightLight(float scale);
 
 	/**
+	* \brief ORO A7 (2026-09-10): THE VC HUD COMBINER GOES LAST. While armed, the cockpit
+	*   render holds the HUD combiner group back instead of drawing it into the frame that
+	*   the addon's HUD_2ND callback resamples - so a full-frame effect (the windscreen
+	*   drops, a blur, a tilt) applied to the world no longer bends the symbology, which is
+	*   inside the cabin. The addon draws it where it belongs with DrawDeferredVCHUD(); if it
+	*   never asks, the client draws it at the end of the HUD_2ND stage anyway - the HUD can
+	*   never go missing. Unarmed = stock order, nothing changes.
+	* \param bDefer true to hold the HUD back each frame, false for the stock order.
+	*/
+	gc_interface void SetDeferVCHUD(bool bDefer);
+
+	/**
+	* \brief ORO A7: draw the HUD combiner that SetDeferVCHUD held back this frame, now -
+	*   from inside a HUD_2ND render callback, at the point in the addon's own stack where
+	*   the HUD belongs (after the effects that act on the WORLD, before the ones that act
+	*   on the EYE). Drawn under the cockpit's own bracket (dry, clear air).
+	* \return true if a deferred HUD was drawn, false if nothing was pending.
+	*/
+	gc_interface bool DrawDeferredVCHUD();
+
+	/**
+	* \brief ORO 2026-09-10: THE REFLECTION OVER WATER. How much of the ground under the
+	*   focus vessel is WATER (the addon reads the planet's own water mask), 0..1. While
+	*   above 0 the planar-mirror pass runs rain or not (up to 1500 m camera height, fading
+	*   from 500 m) and the terrain shows the vessel's image where its water mask says sea,
+	*   with the puddles' own ripple, blur and gain. 0 = stock: nothing without rain.
+	* \param water 0..1, clamped.
+	*/
+	gc_interface void SetWaterMirror(float water);
+
+	/**
+	* \brief ORO patch (aj) 2026-09-12: PLANETARY RINGS - the look of one ringed planet's
+	*   ring system. prm lanes: [0] blend, 0 = stock ARITHMETICALLY (the stock ring shader,
+	*   no ring shadow on the planet, no ring transmission on vessels), 1 = the ORO ring;
+	*   [1] optical-depth trim on the profile's tau; [2] lit-face brightness; [3] backlit
+	*   (transmitted) glow. ROUND 2 (2026-09-12), THE CLOSE-UP - all camera-driven, all
+	*   addon-computed: [4] CONTRAST - the amplitude of the grooves + grain the sheet's
+	*   texture grows, octave by octave, as the camera nears; the grain's anchor as INTEGER
+	*   + FRACTION (a fine octave multiplies the pattern coordinate by up to 512, and
+	*   4096 x 512 leaves float32 a quarter of a cell): [5] the along-track cell offset's
+	*   integer part, [6] the radial offset's integer part, [7] the along-track fraction,
+	*   [8] cells per metre along track, [9] cells per metre radially, [10] the radial
+	*   fraction, [11] DETAIL - the reach of the per-octave fade (1 = a feature shows once it
+	*   subtends ~4 px, 2 = ~2 px, 0 = no detail), [12] RELIEF - the density field read as
+	*   height, its slope tilting the lit normal (0 = flat); [13..15] RESERVED. The offsets are CPU-reduced so the pattern co-rotates at the camera-radius
+	*   orbital rate without a 1e5 rad angle reaching the shader. count <= 16; lanes not
+	*   supplied keep their previous value. Lanes 4..11 change every frame the camera moves,
+	*   so the addon pushes them per frame while a ringed planet is in range (twelve floats
+	*   into a map). Keyed by planet, so Saturn and Uranus are independent.
+	*/
+	gc_interface void SetRingLook(OBJHANDLE hPlanet, const float* prm, int count);
+
+	/**
+	* \brief ORO patch (aj): the planet's ring PROFILE. w x 1 texels of A8R8G8B8 (B,G,R,A in
+	*   memory), LINEAR IN RADIUS from RingMinRadius to RingMaxRadius, RGB = brightness,
+	*   A = 255*sqrt(tau/5). The client copies it into its OWN mipmapped texture (the caller's
+	*   memory may go the moment this returns) and keeps a CPU copy of tau for the per-object
+	*   sun. NULL / w < 2 = drop the profile, which also returns the planet to stock. The
+	*   addon derives this from whatever the planet ships - no per-planet file is required -
+	*   so any ringed planet, stock or addon, gets the ORO ring.
+	*/
+	gc_interface void SetRingProfile(OBJHANDLE hPlanet, const void* pBits, int w);
+
+	/**
 	* \brief Release a swap object after it's no longer needed.
 	* \param hSwap Handle to a swap object.
 	*/

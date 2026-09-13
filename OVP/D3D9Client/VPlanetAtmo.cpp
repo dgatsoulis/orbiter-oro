@@ -15,6 +15,7 @@
 #include "D3D9Client.h"
 #include "D3D9Config.h"
 #include "VPlanet.h"
+#include "RingMgr.h"          // ORO patch (aj): OroRingTransmission reads the ring radii
 #include "AtmoControls.h"
 #include "VectorHelpers.h"
 #include "IProcess.h"
@@ -143,6 +144,8 @@ void vPlanet::GlobalInitAtmosphere(oapi::D3D9Client* gc)
 	if (Config->MicroMode) flags += "_MICROTEX ";
 	if (Config->ShadowMapMode || Config->TerrainShadowing == 3) flags += "_SHDMAP ";	// ORO patch (ae): the cascade atlas rides the shadow sampler too - the terrain must be able to sample it with Vessel mapping None
 	if (Config->EnableMeshDbg) flags += "_DEVTOOLS ";
+	if (Config->LocalLightShadows && Config->LocalLightShadowMaps > 1) flags += (Config->LocalLightShadowMaps >= 6) ? "_LCL6 " : (Config->LocalLightShadowMaps >= 4) ? "_LCL4 " : "_LCL2 ";
+	if (Config->LocalLightShadows && Config->LocalLightShadowPoint == 2) flags += "_LCLCUBE ";	// ORO patch (ah) step 5	// ORO patch (ah) step 4: the spot shadow map count (two float4 per map)
 	if (!Config->bAtmoQuality) flags += "_PERFORMANCE ";
 
 	pRender[PLT_MARS] = new PlanetShader(pDev, "Modules/D3D9Client/NewPlanet.hlsl", "TerrainVS", "TerrainPS", "Mars", (flags + blend).c_str());
@@ -163,6 +166,8 @@ void vPlanet::GlobalInitAtmosphere(oapi::D3D9Client* gc)
 
 	if (Config->ShadowMapMode || Config->TerrainShadowing == 3) flags += "_SHDMAP ";	// ORO patch (ae): the cascade atlas rides the shadow sampler too - the terrain must be able to sample it with Vessel mapping None
 	if (Config->EnableMeshDbg) flags += "_DEVTOOLS ";
+	if (Config->LocalLightShadows && Config->LocalLightShadowMaps > 1) flags += (Config->LocalLightShadowMaps >= 6) ? "_LCL6 " : (Config->LocalLightShadowMaps >= 4) ? "_LCL4 " : "_LCL2 ";
+	if (Config->LocalLightShadows && Config->LocalLightShadowPoint == 2) flags += "_LCLCUBE ";	// ORO patch (ah) step 5	// ORO patch (ah) step 4: the spot shadow map count (two float4 per map)
 	if (!Config->bAtmoQuality) flags += "_PERFORMANCE ";
 
 	pRender[PLT_EARTH] = new PlanetShader(pDev, "Modules/D3D9Client/NewPlanet.hlsl", "TerrainVS", "TerrainPS", "Earth", (flags + blend).c_str());
@@ -486,6 +491,35 @@ FVECTOR4 vPlanet::AmbientApprox(FVECTOR3 vNrm, bool bR)
 
 // ===========================================================================================
 //
+// ORO patch (aj) 2026-09-12: sun transmission through this planet's rings at a planet-
+// relative point. The CPU twin of PlanetTechPS's shadow term: march from the point toward
+// the sun, intersect the ring plane (the planet's equatorial plane - grot's Y), look the
+// profile's optical depth up at that radius, exp(-tau / |cos|) for the slant path, and
+// lerp against 1 by the look's blend so 0 is stock. 1 = clear.
+float vPlanet::OroRingTransmission(const VECTOR3& rel) const
+{
+	if (!ringmgr) return 1.0f;
+	const OroRingLook* look = gcGetRingLook(hObj);
+	if (!look || !look->tau || look->nProf < 2) return 1.0f;
+
+	const VECTOR3 N = mul(grot, _V(0, 1, 0));                 // ring plane normal, world
+	const VECTOR3 S = _V(cp.toSun.x, cp.toSun.y, cp.toSun.z); // toward the sun, world (op.Dir = -toSun)
+	const double  dn = dotp(S, N);
+	if (fabs(dn) < 1e-4) return 1.0f;
+	const double  t = -dotp(rel, N) / dn;
+	if (t <= 0.0) return 1.0f;                                 // the plane is behind, sunward
+
+	const double R  = length(rel + S * t);
+	const double ir = ringmgr->InnerRad() * size, orr = ringmgr->OuterRad() * size;
+	if (R < ir || R > orr || orr <= ir) return 1.0f;
+
+	int i = (int)((R - ir) / (orr - ir) * (look->nProf - 1) + 0.5);
+	if (i < 0) i = 0; if (i > look->nProf - 1) i = look->nProf - 1;
+	const double tau = look->tau[i] * look->prm[1];
+	const float  T   = (float)exp(-tau / max(fabs(dn), 0.02));
+	return 1.0f + (T - 1.0f) * look->prm[0];
+}
+
 D3D9Sun vPlanet::GetObjectAtmoParams(VECTOR3 vRelPos)
 {
 	assert(string(name) != "Sun");
@@ -509,6 +543,14 @@ D3D9Sun vPlanet::GetObjectAtmoParams(VECTOR3 vRelPos)
 	if (oapiGetObjectType(hParent) == OBJTP_PLANET) {
 		cSun *= ::SunOcclusionByPlanet(hParent, vRelPos + gpos);
 	}
+
+	// ORO patch (aj): the RINGS' shadow on whatever is asking - the sun transmitted through
+	// the sheet along the sun line, from the profile's optical depth. Beside the eclipse term
+	// because it is the same kind of thing, and BEFORE the in-space / in-atmosphere split so
+	// every consumer gets it. A 40 m hull against a ~59 km penumbra can never straddle a
+	// shadow edge, so per object is exact, not an approximation. And it is never black: the
+	// Cassini Division's stripe crosses the B ring's shadow, and planetshine is untouched.
+	cSun *= OroRingTransmission(vRelPos);
 
 	cSun *= SunLightColor(vRelPos).rgb * cp.cSun;
 

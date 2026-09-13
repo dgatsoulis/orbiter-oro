@@ -26,6 +26,7 @@
 #include "DebugControls.h"
 #include "D3D9Config.h"
 #include "VPlanet.h"
+#include "OroBaseAnim.h"   // ORO patch (ag): the animated base objects
 
 #pragma warning(push)
 #pragma warning(disable : 4838)
@@ -84,6 +85,7 @@ vBase::vBase (OBJHANDLE _hObj, const Scene *scene, vPlanet *_vP): vObject (_hObj
 	structure_as	= NULL;
 	nstructure_bs	= 0;
 	nstructure_as	= 0;
+	oroAnim         = NULL;   // ORO patch (ag)
 	tspec			= NULL;
 	tilemesh		= NULL;
 	numRunwayLights = 0;
@@ -165,6 +167,29 @@ vBase::vBase (OBJHANDLE _hObj, const Scene *scene, vPlanet *_vP): vObject (_hObj
 	if (nstructure_as = nsas) {
 		structure_as = new D3D9Mesh*[nsas];
 		for (i = 0; i < nsas; i++) { structure_as[i] = new D3D9Mesh(sas[i]); structure_as[i]->AttachNightTextures(); }
+	}
+
+	// ORO patch (ag): THE ANIMATED BASE OBJECTS (2026-09-07). The base's own cfg is
+	// re-read for TRAIN1 / TRAIN2 / SOLARPLANT blocks (see OroBaseAnim.h for why the
+	// core's own machinery never runs under a client); their meshes are APPENDED to
+	// the above-shadow structure list, so every consumer of that list - the render,
+	// the depth pass (z2), the local-light and cascade casters (z3/ae), the night
+	// texture flip, the bounding box - takes them with no further plumbing, and the
+	// core's frozen exports are collapsed so nothing draws twice.
+	{
+		OroBaseAnim *an = new OroBaseAnim(gc, _hObj, hPlanet, GetElevation());
+		if (an->MeshCount()) {
+			an->HideCoreDuplicates(structure_bs, nstructure_bs, structure_as, nstructure_as);
+			const DWORD nNew = nstructure_as + an->MeshCount();
+			D3D9Mesh **as2 = new D3D9Mesh*[nNew];
+			for (i = 0; i < nstructure_as; i++) as2[i] = structure_as[i];
+			for (DWORD k = 0; k < an->MeshCount(); k++) as2[nstructure_as + k] = an->Mesh(k);
+			if (structure_as) delete []structure_as;
+			structure_as = as2;
+			nstructure_as = nNew;
+			oroAnim = an;
+		}
+		else delete an;
 	}
 
 	lights = false;
@@ -253,6 +278,7 @@ vBase::~vBase ()
 		delete []structure_as;
 		structure_as = NULL;
 	}
+	if (oroAnim) { delete oroAnim; oroAnim = NULL; }   // ORO patch (ag): its meshes went with structure_as above
 
 	if (runwayLights) {
 		for(i=0; i<(DWORD)numRunwayLights; i++)
@@ -362,6 +388,12 @@ bool vBase::Update (bool bMainScene)
 		Tlghtchk = simt;
 	}
 
+	// ORO patch (ag): the trains move on sim time (paused = still; warp = faster, as in
+	// 2010); the solar panels aim at the sun and glint at the camera. Both directions go
+	// over in BASE-LOCAL coordinates: vObject's sundir and camera-relative position
+	// through the base's own rotation (grot maps base-local to global, so tmul inverts).
+	if (oroAnim) oroAnim->Update(simt, tmul(grot, sundir), tmul(grot, -cpos));
+
 	if (fabs(simt-Tchk)>1.0) {
 		VECTOR3 pos, sdir;
 		MATRIX3 rot;
@@ -416,6 +448,11 @@ bool vBase::RenderSurface(LPDIRECT3DDEVICE9 dev)
 	// shaders serve hulls too, and a hull's cabin lights must not bloom because a runway
 	// does). Restored to 1 before the function returns.
 	{ extern float g_gcBaseLightsGlow; if (D3D9Effect::eBaseGlow) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseGlow, g_gcBaseLightsGlow); }
+	if (D3D9Effect::eBaseLocal) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseLocal, 1.0f);   // ORO A5: base-local drop glint
+	// ORO 2026-09-11: THIS bracket only - the below-shadow surfaces ARE ground, and they
+	// take the terrain's wet darkening instead of a hull's. The above-shadow brackets
+	// deliberately leave it at 0: a hangar wall is not ground. See gBaseGround.
+	if (D3D9Effect::eBaseGround) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseGround, 1.0f);
 
 	// render tiles
 	if (tilemesh) {
@@ -434,7 +471,20 @@ bool vBase::RenderSurface(LPDIRECT3DDEVICE9 dev)
 		}
 	}
 
+	// ORO 2026-09-10: the wet-ground look on RUNWAYS, PADS and TAXIWAYS. The below-shadow
+	// structures take the vessel shader path and so never had the tile's pools, sky film
+	// or mirrored vessel (his report: "a vessel landed on a textured runway doesn't get
+	// reflected"). Drawn OVER each one, here, inside this same depth-bias bracket so it
+	// z-tests as the surface does. See WetOverlayTech in Mesh.fx. Nothing when dry.
+	{
+		extern float g_gcSurfaceWet;
+		if (nstructure_bs && g_gcSurfaceWet > 0.01f)
+			for (DWORD i = 0; i < nstructure_bs; ++i) structure_bs[i]->RenderWetOverlay(&mWorld);
+	}
+
 	if (D3D9Effect::eBaseGlow) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseGlow, 1.0f);   // ORO patch (ac)
+	if (D3D9Effect::eBaseLocal) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseLocal, 0.0f);  // ORO A5: back to UV keying for vessels
+	if (D3D9Effect::eBaseGround) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseGround, 0.0f); // ORO 2026-09-11: hull darkening for everything else
 	// ORO patch (z): clear the depth bias - see the note at the top
 	dev->SetRenderState(D3DRS_DEPTHBIAS, 0);
 	dev->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, 0);
@@ -457,6 +507,7 @@ bool vBase::RenderStructures(LPDIRECT3DDEVICE9 dev)
 	uCurrentMesh += nstructure_bs;
 
 	{ extern float g_gcBaseLightsGlow; if (D3D9Effect::eBaseGlow) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseGlow, g_gcBaseLightsGlow); }   // ORO patch (ac)
+	if (D3D9Effect::eBaseLocal) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseLocal, 1.0f);   // ORO A5: base-local drop glint
 
 	// render generic objects above shadows
 	for (DWORD i=0; i<nstructure_as; i++) {
@@ -468,6 +519,7 @@ bool vBase::RenderStructures(LPDIRECT3DDEVICE9 dev)
 		++uCurrentMesh;
 	}
 	if (D3D9Effect::eBaseGlow) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseGlow, 1.0f);   // ORO patch (ac)
+	if (D3D9Effect::eBaseLocal) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseLocal, 0.0f);  // ORO A5: back to UV keying for vessels
 	return true;
 }
 
@@ -505,6 +557,48 @@ bool vBase::RenderStructureDepth(const LPD3DXMATRIX pVP, int opt)
 	return true;
 }
 
+// ORO patch (ah) step 2: the above-shadow structures join the spot map's CASTER FIT - each
+// mesh's bounding sphere, taken to world through mWorld (rotation + translation, no scale).
+// Returns how many intersect the beam. Same list RenderStructureDepth draws, so a hangar
+// that can cast is a hangar the fitted frustum keeps.
+// ORO patch (ah) step 5: a POINT light has no axis, so its map is AIMED at the casters - the
+// solid-angle-weighted direction of the visible above-shadow structures within range.
+int vBase::AimLocalShadowCasters(const D3DXVECTOR3& P, float range, D3DXVECTOR3& sum, float& weight)
+{
+	if (!active) return 0;
+	int n = 0;
+	for (DWORD i = 0; i < nstructure_as; i++) {
+		if (!structure_as[i]) continue;
+		D3DXVECTOR3 cl = structure_as[i]->GetBoundingSpherePos();
+		float bsr = structure_as[i]->GetBoundingSphereRadius();
+		D3DXVECTOR3 c; D3DXVec3TransformCoord(&c, &cl, &mWorld);
+		D3DXVECTOR3 rel = c - P;
+		const float d = D3DXVec3Length(&rel);
+		if (d > range + bsr || d <= bsr + 0.01f) continue;        // out of reach, or the light is inside it
+		if (!scn->IsVisibleInCamera(&c, bsr)) continue;
+		const float w = (bsr * bsr) / (d * d);
+		sum += rel * (w / d); weight += w; n++;
+	}
+	return n;
+}
+
+int vBase::FitLocalShadowCasters(const D3DXVECTOR3& P, const D3DXVECTOR3& D, float range, float halfCone, float& halfFit, float& farFit)
+{
+	if (!active) return 0;
+	int n = 0;
+	for (DWORD i = 0; i < nstructure_as; i++) {
+		if (!structure_as[i]) continue;
+		D3DXVECTOR3 cl = structure_as[i]->GetBoundingSpherePos();
+		float bsr = structure_as[i]->GetBoundingSphereRadius();
+		D3DXVECTOR3 c; D3DXVec3TransformCoord(&c, &cl, &mWorld);
+		D3DXVECTOR3 rel = c - P;
+		if (D3DXVec3Length(&rel) > range + bsr) continue;
+		if (!scn->IsVisibleInCamera(&c, bsr)) continue;		// visible receivers only - see Scene.cpp's fit
+		if (OroFitCasterSphere(rel, bsr, D, halfCone, halfFit, farFit)) n++;
+	}
+	return n;
+}
+
 
 
 
@@ -518,6 +612,7 @@ void vBase::RenderRunwayLights(LPDIRECT3DDEVICE9 dev)
 	pCurrentVisual = this;
 
 	{ extern float g_gcBaseLightsGlow; if (D3D9Effect::eBaseGlow) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseGlow, g_gcBaseLightsGlow); }   // ORO patch (ac)
+	if (D3D9Effect::eBaseLocal) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseLocal, 1.0f);   // ORO A5: base-local drop glint
 	{ extern float g_gcBaseLightsHalo; if (D3D9Effect::eBaseHalo) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseHalo, g_gcBaseLightsHalo); }   // ORO patch (ac) part 2
 
 	for(int i=0; i<numRunwayLights; i++)
@@ -531,6 +626,7 @@ void vBase::RenderRunwayLights(LPDIRECT3DDEVICE9 dev)
 		taxiLights[i]->Render(dev, &mWorld, lights);
 	}
 	if (D3D9Effect::eBaseGlow) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseGlow, 1.0f);   // ORO patch (ac)
+	if (D3D9Effect::eBaseLocal) D3D9Effect::FX->SetFloat(D3D9Effect::eBaseLocal, 0.0f);  // ORO A5: back to UV keying for vessels
 	
 	if (DebugControls::IsActive()) {
 		DWORD flags = *(DWORD*)gc->GetConfigParam(CFGPRM_GETDEBUGFLAGS);

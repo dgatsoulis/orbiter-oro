@@ -363,6 +363,47 @@ void LogOapi(const char *format, ...)
 
 // ---------------------------------------------------
 //
+// ===========================================================================
+// ORO PATCH (al) - A REPEATING ERROR IS COLLAPSED
+// ---------------------------------------------------------------------------
+// An error that recurs every frame writes a line every frame, in Orbiter.log as
+// well as here, and DebugLvl defaults to 1 - so it reaches EVERY user, not just
+// someone debugging. One stale addon SetFloat produced 16,252 identical lines in
+// a twenty-minute flight, out of a 17,134-line Orbiter.log: the log a tester is
+// then asked to send in becomes useless at exactly the moment it matters.
+//
+// LOG_MAX_LINES does bound it, at 100,000 - six times that flood, so the safety
+// net is set far above the damage.
+//
+// So a message identical to the last one is COUNTED rather than written, and the
+// count is flushed at most once per REAL second, carrying the tally. Nothing is
+// lost: "[repeated 79 times in the last second]" says more than 79 identical
+// lines do, and says it where it can be seen. A different message closes the
+// previous one's tally first, so no count is ever dropped.
+//
+// Errors only. LogWrn is gated on uEnableLog > 1, above the default, so it never
+// reaches an ordinary user's log; the informational writers are left alone
+// because collapsing those could hide a sequence that matters.
+//
+// Same family as patch (q): a stock defect, reproducible with no addon loaded,
+// that exists because nothing else keeps Orbiter.log worth reading.
+// ===========================================================================
+static char  oroLastErr[ERRBUF + 1] = "";
+static DWORD oroLastErrTick = 0;
+static DWORD oroErrRepeat   = 0;
+
+// Writes whatever is in ErrBuf to both logs. ErrBuf is ESCAPED IN PLACE here, so
+// any copy of the raw text must be taken before calling this.
+static void oroWriteErrLine(DWORD th)
+{
+	fprintf(d3d9client_log,"<font color=Gray>(%s)(0x%lX)</font><font color=Red> [ERROR] ", my_ctime(), th);
+	oapiWriteLogV("D3D9ERROR: %s", ErrBuf);
+	escape_ErrBuf();
+	fputs(ErrBuf,d3d9client_log);
+	fputs("</font><br>\n",d3d9client_log);
+	fflush(d3d9client_log);
+}
+
 void LogErr(const char *format, ...)
 {
 	if (d3d9client_log==NULL) return;
@@ -370,19 +411,43 @@ void LogErr(const char *format, ...)
 	if (uEnableLog>0) {
 		EnterCriticalSection(&LogCrit);
 		DWORD th = GetCurrentThreadId();
-		fprintf(d3d9client_log,"<font color=Gray>(%s)(0x%lX)</font><font color=Red> [ERROR] ", my_ctime(), th);
 
 		va_list args;
 		va_start(args, format);
 		_vsnprintf_s(ErrBuf, ERRBUF, ERRBUF, format, args);
 		va_end(args);
 
-		oapiWriteLogV("D3D9ERROR: %s", ErrBuf);
+		// --- ORO patch (al): collapse a repeat -------------------------------
+		const DWORD now = GetTickCount();
+		if (strcmp(ErrBuf, oroLastErr) == 0) {
+			oroErrRepeat++;
+			// unsigned arithmetic, so the 49-day tick wrap is a non-event
+			if ((DWORD)(now - oroLastErrTick) < 1000) {
+				LeaveCriticalSection(&LogCrit);
+				return;
+			}
+			_snprintf_s(ErrBuf, ERRBUF, ERRBUF, "%s   [repeated %u times in the last second]",
+			            oroLastErr, oroErrRepeat);
+			oroErrRepeat   = 0;
+			oroLastErrTick = now;
+			oroWriteErrLine(th);
+			LeaveCriticalSection(&LogCrit);
+			return;
+		}
+		if (oroErrRepeat) {          // a different error - close the old tally first
+			char pending[ERRBUF + 1];
+			strcpy_s(pending, sizeof(pending), ErrBuf);
+			_snprintf_s(ErrBuf, ERRBUF, ERRBUF, "%s   [repeated %u more times]",
+			            oroLastErr, oroErrRepeat);
+			oroWriteErrLine(th);
+			strcpy_s(ErrBuf, sizeof(ErrBuf), pending);
+			oroErrRepeat = 0;
+		}
+		strcpy_s(oroLastErr, sizeof(oroLastErr), ErrBuf);   // the RAW text, before escaping
+		oroLastErrTick = now;
+		// --- end ORO patch (al) ----------------------------------------------
 
-		escape_ErrBuf();
-		fputs(ErrBuf,d3d9client_log);
-		fputs("</font><br>\n",d3d9client_log);
-		fflush(d3d9client_log);
+		oroWriteErrLine(th);
 		LeaveCriticalSection(&LogCrit);
 	}
 }

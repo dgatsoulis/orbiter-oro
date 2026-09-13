@@ -48,12 +48,15 @@ MatMgr::~MatMgr()
 			if (pCamera[i].pOmitAttc) delete[] pCamera[i].pOmitAttc;
 			if (pCamera[i].pOmitDock) delete[] pCamera[i].pOmitDock;
 			if (pCamera[i].pGrpRng)   delete[] pCamera[i].pGrpRng;
+			if (pCamera[i].pGrpMesh)  delete[] pCamera[i].pGrpMesh;
 		}
 		delete[] pCamera;
 	}
 	if (pPlane) {
-		for (DWORD i = 0; i < MAX_ENVPLN; i++)
+		for (DWORD i = 0; i < MAX_ENVPLN; i++) {
 			if (pPlane[i].pGrpRng) delete[] pPlane[i].pGrpRng;
+			if (pPlane[i].pGrpMesh) delete[] pPlane[i].pGrpMesh;
+		}
 		delete[] pPlane;
 	}
 }
@@ -102,6 +105,7 @@ void MatMgr::ResetPlane(DWORD idx)
 	pPlane[idx].refGrp = -1;
 	pPlane[idx].nGrpRng = 0;
 	pPlane[idx].pGrpRng = NULL;
+	pPlane[idx].pGrpMesh = NULL;
 	pPlane[idx].rDist = 5.0f;
 }
 
@@ -119,6 +123,7 @@ void MatMgr::ResetCamera(DWORD idx)
 	pCamera[idx].pOmitDock = NULL;
 	pCamera[idx].nGrpRng = 0;      // ORO patch (v)
 	pCamera[idx].pGrpRng = NULL;
+	pCamera[idx].pGrpMesh = NULL;
 	pCamera[idx].bBox = false;
 	pCamera[idx].bxC = D3DXVECTOR3(0, 0, 0);
 	pCamera[idx].bxE = D3DXVECTOR3(0, 0, 0);
@@ -519,6 +524,7 @@ bool MatMgr::ParseCameraFile(const char* path, class VESSEL* vessel, bool bExt)
 	DWORD camera = 0;
 	int   plane  = -1;   // ORO patch (v) part 2: >= 0 while inside a PLANE block
 	WORD  grplist[128];
+	short meshsel[64];   // ORO patch (ah): the mesh each range applies to, -1 = all (parallel to grplist pairs)
 
 	BYTE attclist[256];
 	BYTE docklist[256];
@@ -548,6 +554,8 @@ bool MatMgr::ParseCameraFile(const char* path, class VESSEL* vessel, bool bExt)
 			if (igrp) {
 				pCamera[camera].pGrpRng = new WORD[igrp];
 				memcpy(pCamera[camera].pGrpRng, grplist, igrp * sizeof(WORD));
+				pCamera[camera].pGrpMesh = new short[igrp / 2];
+				memcpy(pCamera[camera].pGrpMesh, meshsel, (igrp / 2) * sizeof(short));
 			}
 			pCamera[camera].nGrpRng = WORD(igrp / 2);
 
@@ -593,7 +601,18 @@ bool MatMgr::ParseCameraFile(const char* path, class VESSEL* vessel, bool bExt)
 		if (bExt && !strncmp(cbuf, "GROUPS", 6)) {
 			DWORD ga, gb;
 			if (sscanf_s(cbuf, "GROUPS %u %u", &ga, &gb) != 2) { LogErr("Invalid Line in (%s): %s", path, cbuf); continue; }
-			if (igrp + 2 <= 128) { grplist[igrp++] = WORD(ga); grplist[igrp++] = WORD(gb); }
+			if (igrp + 2 <= 128) { meshsel[igrp / 2] = -1; grplist[igrp++] = WORD(ga); grplist[igrp++] = WORD(gb); }
+			continue;
+		}
+
+		// ORO patch (ah) 2026-09-08: "MESHGROUPS m a b" - groups a..b of MESH m only. GROUPS
+		// applies its range to every mesh of the vessel by group NUMBER, which is right for a
+		// single-mesh hull and wrong for a vessel of a hundred meshes (DaveS's SSV: the Ku
+		// antenna is mesh 109). GRPREF already named a mesh; this makes the ranges match it.
+		if (bExt && !strncmp(cbuf, "MESHGROUPS", 10)) {
+			DWORD gm, ga, gb;
+			if (sscanf_s(cbuf, "MESHGROUPS %u %u %u", &gm, &ga, &gb) != 3) { LogErr("Invalid Line in (%s): %s", path, cbuf); continue; }
+			if (igrp + 2 <= 128) { meshsel[igrp / 2] = short(gm); grplist[igrp++] = WORD(ga); grplist[igrp++] = WORD(gb); }
 			continue;
 		}
 
@@ -615,6 +634,8 @@ bool MatMgr::ParseCameraFile(const char* path, class VESSEL* vessel, bool bExt)
 			if (plane >= 0 && igrp) {
 				pPlane[plane].pGrpRng = new WORD[igrp];
 				memcpy(pPlane[plane].pGrpRng, grplist, igrp * sizeof(WORD));
+				pPlane[plane].pGrpMesh = new short[igrp / 2];
+				memcpy(pPlane[plane].pGrpMesh, meshsel, (igrp / 2) * sizeof(short));
 				pPlane[plane].nGrpRng = WORD(igrp / 2);
 			}
 			plane = -1; igrp = 0;

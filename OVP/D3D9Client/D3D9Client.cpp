@@ -36,6 +36,7 @@
 #include "OapiExtension.h"
 #include "DebugControls.h"
 #include "Surfmgr2.h"
+#include "OroBaseAnim.h"   // ORO patch (ag): ArmCoreSolarPlants at session close
 #include "gcCore.h"
 #include "gcConst.h"
 #include <unordered_map>
@@ -828,6 +829,12 @@ void D3D9Client::clbkCloseSession(bool fastclose)
 	//	Post shutdown signals for user applications
 	//
 	if (IsGenericProcEnabled(GENERICPROC_SHUTDOWN)) MakeGenericProcCall(GENERICPROC_SHUTDOWN, 0, NULL);
+
+	// ORO patch (ag): the core's SolarPlant destructor frees pointers its constructor never
+	// set unless the object was activated - see OroBaseAnim::ArmCoreSolarPlants. Every
+	// base with a SOLARPLANT block gets its objects activated now, before the planetary
+	// system is torn down (0xC0000374 at every exit otherwise, 2026-09-08).
+	OroBaseAnim::ArmCoreSolarPlants(this);
 
 
 	// Check the status of RenderTarget Stack ------------------------------------------------
